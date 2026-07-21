@@ -1239,6 +1239,182 @@ src/auth/          → identityチームが所有
 tests/contracts/   → 関係する双方のチームがレビュー
 ```
 
+##### 依存方向と相互依存をビルドグラフで可視化・検知する
+
+**結論から言えば、宣言されたコード依存の多くは、ビルドシステムで可視化し、CIで禁止できる。** ただし、ビルドグラフが知っているのは、ビルドターゲット、プロジェクト、パッケージ、importなどとして明示・解析できる依存である。同じDBテーブルへ文字列でSQLを発行する、実行時にURLを組み立てて別サービスを呼ぶ、Reflectionや動的ロードでクラスを参照するといった依存は、通常のビルドグラフだけでは完全に検出できない。
+
+| 検査したいこと | ビルドシステムで可能か | 必要な前提・補助 |
+|---|---|---|
+| モジュールAがモジュールBへ依存しているか | **可能** | モジュールを別ターゲット／別プロジェクトとして定義する |
+| 直接・推移的な依存経路 | **可能** | `deps`、dependency tree、project graphを使う |
+| あるモジュールの変更で影響を受ける逆依存 | **可能** | `rdeps`、affected graphなどを使う |
+| 業務モジュール間の循環依存 | **可能** | ビルドグラフまたはアーキテクチャテストでCIを失敗させる |
+| 他モジュールの`internal`への直接import | **可能** | `internal`を別ターゲットにし、visibility／境界ルールを設定する |
+| Clean Architectureの依存方向違反 | **可能** | `domain`、`usecases`、`adapters`を識別可能にし、アーキテクチャテストを置く |
+| 複数モジュールが同じテーブルを書き換える | **そのままでは困難** | スキーマ所有、SQL解析、マイグレーション検査、DB権限が必要 |
+| 動的なHTTP・イベント連携 | **不完全** | API／イベント契約、サービスカタログ、分散トレースなどが必要 |
+
+> 🔑 **可視化だけでは境界を守れない。** 依存グラフを眺めるだけでなく、「許可されない辺が追加されたらビルドを落とす」ルールまで置いて、初めてアーキテクチャ境界になる。
+
+**ビルドシステムが扱える粒度でモジュールを表現することが前提**である。`src/pricing/`と`src/orders/`をフォルダで分けただけで、両方を1つの無制限なビルドターゲットとしてコンパイルしている場合、ビルドシステムからは1ノードにしか見えず、内部の相互依存を止められない。最低でも、次のどちらかが必要になる。
+
+- 1業務モジュール、または公開APIと内部実装を、別のビルドターゲット／プロジェクトとして定義する
+- 同一ターゲットのままなら、importを解析するlinterやアーキテクチャテストでパッケージ間ルールを検証する
+
+###### 具体例1：Bazel
+
+Bazelは言語横断のビルドシステムで、`BUILD`ファイルに細粒度のターゲットと`deps`を明示する。Query Languageで依存を調査できる。
+
+```bash
+# ordersが依存する全ターゲット
+bazel query 'deps(//orders:orders)'
+
+# pricingの公開APIを利用する全ターゲット（逆依存）
+bazel query 'rdeps(//..., //pricing:api)'
+
+# ordersからpricing内部実装までの依存経路を1本表示
+bazel query 'somepath(//orders:orders, //pricing/internal:internal)'
+
+# グラフをSVGとして出力
+bazel query 'deps(//orders:orders)' --output graph | dot -Tsvg > deps.svg
+```
+
+さらに、ターゲットの`visibility`で利用可能なパッケージを制限できる。
+
+```python
+# pricing/internal/BUILD.bazel
+java_library(
+    name = "internal",
+    srcs = glob(["**/*.java"]),
+    visibility = ["//pricing:__subpackages__"],
+)
+
+# pricing/BUILD.bazel
+java_library(
+    name = "api",
+    srcs = glob(["api/**/*.java"]),
+    visibility = ["//visibility:public"],
+)
+```
+
+この場合、`orders`は`//pricing:api`へ依存できるが、`//pricing/internal:internal`へ依存するとビルドが失敗する。**公開APIと内部実装をターゲットとして分け、内部ターゲットをprivate-by-defaultにする**のが重要である。
+
+###### 具体例2：Nx
+
+Nxはモノレポ内のプロジェクト依存をProject Graphとして構築し、対話的に可視化できる。
+
+```bash
+# 全体の依存グラフ
+npx nx graph
+
+# pricingを中心に表示
+npx nx graph --focus pricing
+
+# 変更の影響を受けるプロジェクトだけテスト
+npx nx affected -t test
+```
+
+JavaScript／TypeScriptでは`@nx/enforce-module-boundaries`を使い、`scope:pricing`、`scope:orders`、`type:public-api`、`type:internal`のようなタグで許可依存を宣言できる。たとえば「ordersはpricingのpublic-apiへは依存できるが、pricingのinternalへは依存できない」という規則をlintとCIで強制できる。NxのProject Graphはソースコードから再計算されるため、手書きの依存図を更新する必要がない。
+
+###### 具体例3：Gradle＋ArchUnit
+
+Gradleのmulti-project buildでは、`pricing`、`orders`などをsubprojectにすると、project dependencyがビルド順序とclasspathに反映される。
+
+```kotlin
+// orders/build.gradle.kts
+dependencies {
+    implementation(project(":pricing-api"))
+    // implementation(project(":pricing-internal")) は許可しない
+}
+```
+
+依存関係は次のコマンドで調べられる。
+
+```bash
+./gradlew :orders:dependencies
+./gradlew :orders:dependencyInsight --dependency pricing
+```
+
+ただし、Gradle標準のdependency reportは主に依存の**表示と解決**を担当し、業務上の依存方向を自動的には理解しない。JVMではArchUnitをテストへ組み込み、パッケージ依存、レイヤー方向、業務モジュール間の循環をCIで検査できる。
+
+```java
+@ArchTest
+static final ArchRule modules_must_be_acyclic =
+    slices().matching("com.example.(*)..")
+        .should().beFreeOfCycles();
+
+@ArchTest
+static final ArchRule domain_must_not_depend_on_adapters =
+    noClasses().that().resideInAPackage("..domain..")
+        .should().dependOnClassesThat().resideInAPackage("..adapters..");
+```
+
+このテストを通常の`test`タスクに含めれば、違反したコミットはGradle buildで落ちる。つまりArchUnit自体はビルドシステムではないが、**Gradle／Mavenが実行するアーキテクチャゲート**として機能する。
+
+###### 具体例4：Maven
+
+Mavenのmulti-module projectでも、業務モジュールを別artifactにすれば、依存を可視化できる。
+
+```bash
+mvn dependency:tree
+```
+
+Maven Enforcer Pluginの`bannedDependencies`を使うと、特定artifactへの直接・推移的な依存を禁止し、違反時にビルドを失敗させられる。ただし、1つのartifact内にすべての業務モジュールを入れた場合、artifact単位のEnforcerだけではpackage間の違反を見分けられない。その場合はArchUnitなどを併用する。
+
+###### 共有データモデルと複数Writerは、別のゲートが必要
+
+「複数の業務モジュールが1つのデータモデルへアクセスする」ことを、すべて同じ強さのアンチパターンとして扱うべきではない。
+
+| 状況 | 判断 |
+|---|---|
+| `Money`、`UserID`など意味が安定した不変Value Objectを共有する | 許容できる場合がある。小さなShared Kernelとして変更を厳しく管理する |
+| 他モジュールが公開されたDTO／Read Modelを読み取る | 所有者と契約が明確なら許容できる |
+| 複数モジュールが同じDomain Entityを自分のモデルとして直接変更する | **避ける。** 用語・不変条件・変更責任が混ざる |
+| 複数モジュールが同じテーブルへ`INSERT`／`UPDATE`／`DELETE`する | **原則として避ける。** 単一のWriterと不変条件の所有者を決める |
+
+問題の本質は、同じデータを読んだことではなく、**誰が正本を所有し、誰が不変条件を守り、誰が変更できるかが一意でないこと**である。
+
+```
+orders ──公開コマンド──▶ pricing ──唯一のWriter──▶ pricing schema
+   │                         │
+   └────公開Query／Event◀────┘
+
+orders ───────────────X────────────▶ pricingのテーブルを直接UPDATE
+```
+
+コード上では、所有モジュールだけがRepository実装とmigrationへ依存できるよう、Bazel visibility、Nx boundary rule、別Gradle project、ArchUnitなどで制限する。しかし、次のようなSQLはビルドグラフに現れないことがある。
+
+```sql
+UPDATE pricing.price_history SET ...;
+```
+
+そのため、データ所有は次の多層ゲートで強制する。
+
+1. **コード境界**：Repository／DAOとmigrationを所有モジュールの`internal`に置き、他モジュールからimportできなくする
+2. **マイグレーション境界**：各schemaのmigrationディレクトリに所有者を割り当て、CIとCODEOWNERSで他モジュールからの変更を止める
+3. **DB権限**：可能ならモジュールごとにDB roleを分け、所有モジュールだけへ`INSERT`、`UPDATE`、`DELETE`を与える。他モジュールには必要最小限の`SELECT`またはViewだけを与える
+4. **契約境界**：他モジュールは公開コマンド、クエリ、イベントを通し、契約テストを置く
+5. **検査と観測**：SQL lint、DB監査ログ、分散トレースで、静的グラフから漏れる実行時依存を検出する
+
+PostgreSQLなどは、テーブルまたは列単位で`SELECT`、`INSERT`、`UPDATE`、`DELETE`をroleへ付与・剥奪できる。別プロセス／別接続roleなら、複数Writerを実行時にも拒否できる。一方、モジュラーモノリス全体が1つの強いDB roleとコネクションプールを共有している場合、DBからは呼び出し元モジュールを識別できない。この構成では、コード境界、アーキテクチャテスト、migration所有を主なゲートにし、必要になった時点で接続roleやschemaを分離する。
+
+**推奨するCI構成**
+
+```text
+PRごと
+  1. ビルドターゲット／Project Graphを再計算
+  2. visibility・module boundary・ArchUnit・Enforcerを実行
+  3. 禁止依存または循環があればマージをブロック
+  4. 変更ターゲットと逆依存を抽出し、該当テストを実行
+  5. migration所有とDB権限定義の差分を検査
+
+定期実行
+  6. 依存グラフ、公開ターゲット数、循環、例外ルールをレポート
+  7. DB監査ログや実行時トレースと、宣言された契約を照合
+```
+
+> 🔑 **ビルドグラフはコード依存のsource of truthにできるが、データ所有のsource of truthには単独ではなれない。** コード依存はビルド／アーキテクチャテスト、データ変更権限はschema所有／DB role、サービス間連携は契約テスト、というように、境界ごとに実際に拒否できるゲートを置く。
+
 ##### 変更影響は逆依存とテストで機械的に調べる
 
 ディレクトリは「どこから読み始めるか」を示すが、影響範囲を完全には示さない。変更影響は次の順で絞る。
@@ -1278,7 +1454,145 @@ flowchart LR
 
 > 🔑 **コードは現在の業務構造を表し、`specs/`とGitは開発の経緯を表す。** 開発スライスを履歴側へ、安定した業務能力をコード側へ置き、公開契約・逆依存・テストによって変更影響を機械的に示す。これがVertical Slice、TDD、クリーンアーキテクチャを無理なく組み合わせる構成である。
 
-### 7.6 粒度と範囲は別物
+### 7.6 業務モジュール・開発スライス・TDDの責務を混同しない
+
+ここまでの説明から、次のように理解したくなる。
+
+> 業務モジュールとスライスは、クリーンアーキテクチャやDDDに従って分割し、どのスライスをどの粒度で実装するかはTDDで決める。
+
+**方向は近いが、そのままでは責務の割り当てが正確ではない。** 特に次の2点を修正する必要がある。
+
+1. **DDDは業務モジュールの境界を考える有力な手段だが、クリーンアーキテクチャは主に境界の内側の依存方向を定める。** クリーンアーキテクチャだけから、`pricing`と`orders`をどこで分けるかは導けない。
+2. **どの開発スライスを選び、どこまでを1つの価値増分にするかは、TDDだけでは決まらない。** プロダクト上の価値、リスク、学習、依存順序と、Vertical Slicing／User Story Splittingによって決める。TDDは、選ばれたスライスの完成条件をテストに固定し、実装を小さなフィードバック単位へ分解する。
+
+#### それぞれの方法論が答える問い
+
+| 問い | 主に使う考え方 | 得られるもの |
+|---|---|---|
+| どの業務概念・ルール・データを一緒に置くか | **戦略的DDD**（業務能力、Subdomain、Bounded Context、Ubiquitous Language） | 業務モジュールの候補 |
+| モジュール内部でDB・UI・外部APIへどう依存するか | **Clean Architecture / Ports & Adapters** | 依存方向、`domain`・`usecases`・`ports`・`adapters`の境界 |
+| 大きな機能から、何を独立した完成増分として切り出すか | **Vertical Slicing / User Story Splitting** | 開発スライスと受け入れシナリオ |
+| 候補スライスのうち、次に何を作るか | **プロダクト判断＋リスク管理** | 実装順序。価値、制約、不確実性、学習、依存関係による優先順位 |
+| 選んだスライスをどう実装していくか | **Double Loop TDD / TDD** | 外側の受け入れテストと、内側のRed-Green-Refactor |
+| 変更時にどのテストを実行するか | **テスト戦略＋依存グラフ** | ユニット、統合、契約、E2Eの配分と変更影響ベースのテスト選択 |
+
+> 🔑 **DDDは「業務の境界」、Clean Architectureは「依存の境界」、Vertical Slicingは「価値の増分」、TDDは「実装時のフィードバック」を主に扱う。** 相互に補完するが、同じ問いへの別名ではない。
+
+#### 業務モジュールは戦略的DDDを中心に、仮説として切る
+
+業務モジュールは、ファイル数、画面数、テーブル数、開発スライスの履歴ではなく、次の兆候を使って見つける。
+
+- 同じ業務用語が、同じ意味で使われる
+- 同じ不変条件と業務ルールを守る
+- データとルールの正本を1つの所有者へ置ける
+- 同じ業務上の理由で変更される
+- 内部では強く協調するが、外部とは小さな公開契約で接続できる
+- 別モジュールの内部モデルを知らなくても、典型的なユースケースを進められる
+
+たとえば同じ`Product`という名前でも、Catalogでは「販売可能な商品」、Pricingでは「価格比較の対象」、Ordersでは「注文時点の明細」を意味するなら、各モジュールで別のモデルを持つ方が自然である。反対に、分割した2つの候補が、ほぼすべての要求で同時に変更され、頻繁に互いの内部データを問い合わせるなら、分けすぎの可能性が高い。
+
+ただし、**DDDにも正しい境界を機械的に算出する手順はない。** 最初は粗いContext Mapと公開契約を置き、実際のスライスを通して、変更の凝集度、モジュール間通信、言葉の違いを観察しながら統合・分割する。単純なCRUD領域へ、複雑なドメインモデルや同じ数の層を強制する必要もない。
+
+また、1つの受け入れシナリオが複数の業務モジュールを利用することはある。たとえば「注文を確定すると決済され、確認通知が送られる」はOrders、Payments、Notificationsを通る。その場合も、ユースケースの調整責任を持つモジュールを1つ決め、他モジュールの内部実装ではなく公開コマンド、クエリ、イベントだけを使う。
+
+#### 開発スライスは「1つの観測可能な結果」で切る
+
+業務モジュールを決めることと、今回実装するスライスを決めることは別の判断である。実務上は、次を1スライスの出発点にするとよい。
+
+> **1人の利用者または外部主体が、1つのきっかけによって、1つの意味ある結果を観測できる最小の端から端までの増分。**
+
+```
+誰が：        利用者が
+きっかけ：    有効な商品URLを1つ登録すると
+観測結果：    取得・保存された現在価格を一覧で確認できる
+```
+
+`DBテーブルを作る`、`APIを作る`、`UIを作る`は、スライスを実現する技術タスクではあるが、単独ではスライスではない。反対に、`商品価格を追跡できる`は、複数商品、履歴、取得失敗、再試行、通知などを含みうるため、通常は広すぎる。
+
+大きな機能は、次の順で分割候補を探す。
+
+1. **操作**：登録、変更、削除、検索を分ける
+2. **ワークフロー経路**：基本経路を先に通し、追加の経路を後にする
+3. **業務ルールのバリエーション**：通常価格、会員価格、セール価格を分ける
+4. **データのバリエーション**：代表形式を先に扱い、別形式を後にする
+5. **外部インターフェース**：1つの連携先を先に通し、別の連携先を後にする
+6. **単純版と複雑版**：1件、手動、低負荷の基本形を先に通し、複数件、自動化、大規模化を後にする
+7. **非機能要件**：正しく動く最小形を先に作り、性能や運用性を後続にできるか検討する。ただし、セキュリティ、法令、データ損失防止など完成の前提になるものは後回しにしない
+
+分割の目的は、すべてを同じ大きさに揃えることではない。**価値、リスク、学習のいずれかを、短いフィードバックで得られる単位にすること**である。
+
+#### 「どのスライスを次に選ぶか」はTDDの外側の判断
+
+候補スライスの実装順序は、原則として次の順で判断する。
+
+1. **先に守る必要がある制約**：セキュリティ、法令、金額・在庫の整合性、データ損失防止
+2. **最大の不確実性と失敗影響**：外部API、永続化、認証、性能限界など、間違えると設計を大きく戻す境界
+3. **利用者・業務への価値**：早く実物を見せることで、必要性や期待値を確認できるもの
+4. **学習価値**：後続の見積もりや境界設計を改善する知識が得られるもの
+5. **依存関係**：複数の後続スライスを解放する前提。ただし、技術基盤だけを長期間横に作らず、それを使う最初の縦スライスと一緒に通す
+
+したがって、最初のスライスは「最も簡単なもの」ではなく、**意味のある価値を持ちながら、最も早く潰したいリスクを本物で通る細い経路**になることが多い。
+
+TDDは、その候補の事業価値や実装順序を決めてはくれない。一方、赤い受け入れテストを書こうとして期待値を1つに決められない、準備が巨大になる、失敗理由が多すぎると分かった場合、**スライスが大きすぎることを発見する診断装置**にはなる。
+
+#### 外側の粒度と内側の粒度を分ける
+
+「どの粒度で分割するか」には、異なる2つの答えがある。
+
+| 粒度 | 対象 | 主な判断基準 | TDDとの関係 |
+|---|---|---|---|
+| **外側の開発スライス粒度** | 受け入れ可能な価値増分 | 独立して意味がある、安全に完成と呼べる、短期間でフィードバックできる | Double Loop TDDの外側で完成条件を固定するが、粒度は価値とリスクから決める |
+| **内側のTDDステップ粒度** | 次に追加する小さな振る舞い | 失敗理由が1つ、実装方針が見える、数分〜短時間でRed-Green-Refactorできる | **TDDが直接扱う粒度** |
+
+外側の受け入れテストが1本でも、それを緑にするまでに、価格パース、Moneyへの変換、保存と読み戻し、エラー分類など複数の内側ループを回してよい。逆に、外側の受け入れシナリオを、内部関数ごとのスライスへ細分化してはいけない。
+
+#### 分割を止める条件
+
+次を満たしたら、いったん1スライスとして着手できる。
+
+- 利用者、きっかけ、観測結果を1文で説明できる
+- 主要な受け入れシナリオを具体的な入力と期待値で書ける
+- 技術層の途中ではなく、必要な層を端から端まで通る
+- 他の候補が未実装でも、限定した条件の下で完成と呼べる
+- 安全に完成と呼ぶため不可欠な異常系だけを含み、それ以外を後続へ明示できる
+- 数時間〜数日程度の短い周期で、価値、リスク、学習のいずれかについてフィードバックを得られる
+- 最大の不確実性をモックの奥へ隠していない
+
+次の兆候があれば、まだ大きすぎる。
+
+- 説明に独立した複数の「そして」が入る
+- 複数の操作、業務ルール、データ形式、外部連携先を一度に扱う
+- 受け入れテストに互いに無関係な失敗理由が多数ある
+- 数日作業しても、端から端まで動く経路が1本もできない
+
+次の兆候があれば、小さく切りすぎて横スライスになっている。
+
+- DB、API、UIなど1つの技術層だけで終わる
+- 単独の受け入れ条件を持てない
+- 利用者も外部主体も変化を観測できない
+- 単独では価値、リスク低減、学習のいずれも生まない
+
+#### 実践手順
+
+```
+① 戦略的DDDで、業務能力・用語・ルール・データ所有から仮のモジュール境界を置く
+        ↓
+② 実現したい利用者の結果を列挙する
+        ↓
+③ 操作・経路・業務ルール・データ・連携先で、端から端までの候補スライスへ分ける
+        ↓
+④ 価値・制約・リスク・学習・依存関係から、次の1スライスを選ぶ
+        ↓
+⑤ 人間が受け入れ条件と、今回含めないものを確定する
+        ↓
+⑥ 赤い受け入れテストを置き、内側のTDDを小さく回す
+        ↓
+⑦ 完成後、実際の変更凝集度とモジュール間依存を見て、境界と次のスライスを修正する
+```
+
+> **すべてのモジュール境界と全スライスを最初に確定してからTDDを始めるのではない。** 最初の境界は仮説、次のスライスは選択、受け入れテストは今回の約束である。1スライスを完成させて得た知識を、次の境界と選択へ戻すところまでが開発ループになる。
+
+### 7.7 粒度と範囲は別物
 
 | 用語 | 意味 |
 |---|---|
@@ -1293,7 +1607,7 @@ flowchart LR
 | **ユニットテスト**（内部ロジック） | LLMに書かせてよい | 実装と同時でよい | △ |
 | **回帰テスト**（現状固定） | LLMに大量生成させる | 実装**後** | ✗ 持たなくてよい |
 
-### 7.7 テストの優先順位
+### 7.8 テストの優先順位
 
 **判断基準は1つだけ。**
 
@@ -1331,7 +1645,7 @@ flowchart LR
 
 > 💡 **型を効かせるほどテストの必要量は減る。**
 
-### 7.8 テストと型は「変えにくい」のか
+### 7.9 テストと型は「変えにくい」のか
 
 **変えにくさは「型かどうか」で決まるのではなく、「誰から見えているか」で決まります。**
 
@@ -1393,8 +1707,10 @@ Test_priceCache_の_get_が_nil_を返すこと
 | **11** | TDD＝AIに正確な実装をさせる手法 | **行きすぎ。** Kent Beckの主眼はもともと**設計手法**。AI時代の効能は追加であって、設計手法としての側面が本体 |
 | **12** | 理論が完成してからテストと型を作る | **❌ ウォーターフォールに戻る。** 理論は作ることでしか構築されない。**二層ルール**（不変条件は事前、機能はスライスごとに都度）で解く。**理論の単位はシステム全体ではなく1スライス** |
 | **13** | 1スライス＝1機能 | **スライスは機能より薄い。** 機能は横に広く、スライスは縦に細い。**必要な全層に触れるが、必要な部分だけに触れる。難所を先に、本物で通す** |
-| **14** | 粒度＝テスト範囲 | **別物。** 粒度＝1サイクルの小ささ（時間軸）、範囲＝何をテストするか（対象）。範囲の判断基準は「**壊れたときに気づけるか**」 |
-| **15** | テストと型は簡単に変えられない | **形式ではなく「誰から見えているか」で決まる。** 公開契約はHARD（意図的に固く）、内部はAUTO（むしろ育てる）。内部実装に密結合したテストは**ただの負債** |
+| **14** | DDD／クリーンアーキテクチャがスライスを決める | **一部だけ正しい。** 戦略的DDDは業務モジュールの候補を見つけ、Clean Architectureは主にその内側の依存方向を決める。開発スライスはVertical Slicingで利用者の観測可能な結果として切る |
+| **15** | どのスライスをどの粒度で作るかはTDDが決める | **外側と内側を分ける。** 次のスライスは価値・制約・リスク・学習・依存関係で選び、外側の粒度は独立した完成可能性とフィードバック時間で決める。TDDが直接扱うのは、選んだスライスの完成条件と内側の小さな実装ステップ |
+| **16** | 粒度＝テスト範囲 | **別物。** 粒度＝1サイクルの小ささ（時間軸）、範囲＝何をテストするか（対象）。範囲の判断基準は「**壊れたときに気づけるか**」 |
+| **17** | テストと型は簡単に変えられない | **形式ではなく「誰から見えているか」で決まる。** 公開契約はHARD（意図的に固く）、内部はAUTO（むしろ育てる）。内部実装に密結合したテストは**ただの負債** |
 
 ---
 
@@ -1530,8 +1846,20 @@ Naurの読解が投げかける問いです。
 - [Feature Slices for ASP.NET Core MVC – Microsoft Learn](https://learn.microsoft.com/en-us/archive/msdn-magazine/2016/september/asp-net-core-feature-slices-for-asp-net-core-mvc)
 - [Test ASP.NET Core MVC apps – Microsoft Learn](https://learn.microsoft.com/en-us/dotnet/architecture/modern-web-apps-azure/test-asp-net-core-mvc-apps)
 - [Data sovereignty per microservice – Microsoft Learn](https://learn.microsoft.com/en-us/dotnet/architecture/microservices/architect-microservice-container-applications/data-sovereignty-per-microservice)
+- [Use domain analysis to model microservices – Microsoft Learn](https://learn.microsoft.com/en-us/azure/architecture/microservices/model/domain-analysis)
+- [Identifying domain-model boundaries for each microservice – Microsoft Learn](https://learn.microsoft.com/en-us/dotnet/architecture/microservices/architect-microservice-container-applications/identify-microservice-domain-model-boundaries)
 - [Package testing – The Go Programming Language](https://go.dev/pkg/testing/)
 - [Query guide – Bazel](https://bazel.build/query/guide)
+- [Visibility – Bazel](https://bazel.build/concepts/visibility)
+- [Explore your workspace – Nx](https://nx.dev/docs/features/explore-graph)
+- [Enforce module boundaries – Nx](https://nx.dev/docs/features/enforce-module-boundaries)
+- [Run only tasks affected by a PR – Nx](https://nx.dev/docs/features/ci-features/affected)
+- [Multi-Project Builds – Gradle](https://docs.gradle.org/current/userguide/multi_project_builds.html)
+- [Viewing and debugging dependencies – Gradle](https://docs.gradle.org/current/userguide/viewing_debugging_dependencies.html)
+- [Maven Dependency Plugin](https://maven.apache.org/plugins/maven-dependency-plugin/)
+- [Banned Dependencies – Maven Enforcer Plugin](https://maven.apache.org/enforcer/enforcer-rules/bannedDependencies.html)
+- [ArchUnit User Guide](https://www.archunit.org/userguide/html/000_Index.html)
+- [GRANT – PostgreSQL](https://www.postgresql.org/docs/current/sql-grant.html)
 - [About code owners – GitHub Docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)
 
 ### 論文・プレプリント
@@ -1545,6 +1873,9 @@ Naurの読解が投げかける問いです。
 
 ### 実践記事
 
+- Robert C. Martin, [*The Clean Architecture*](https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html)
+- Martin Fowler, [*Test Driven Development*](https://martinfowler.com/bliki/TestDrivenDevelopment.html)
+- Humanizing Work, [*The Humanizing Work Guide to Splitting User Stories*](https://www.humanizingwork.com/the-humanizing-work-guide-to-splitting-user-stories/)
 - サーバーワークス「仕様駆動開発で『どれが正しい仕様？』がわからなくなったので、管理方針を決めた話」
 - GitHub spec-kit Discussion #152「Evolving specs」
 - Kent Beck によるTDDとAIエージェントに関する言及
