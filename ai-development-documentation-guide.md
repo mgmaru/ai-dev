@@ -1099,6 +1099,185 @@ flowchart LR
 
 > 🔑 **進捗管理の単位はスライス、完成の証拠は緑のテスト、状態の管理者はCI。** 無駄な管理文書を減らすことは、単なる効率化ではなく、仕様・実装・進捗の乖離を防ぐ設計である。
 
+#### TDDとVertical Sliceに適したディレクトリ構成
+
+まず前提として、**TDDはディレクトリ構成を規定しない。** TDDが規定するのは、テストを先に置き、Red-Green-Refactorを小さく回す開発リズムである。コードをどこに置くかは、アーキテクチャと各言語・フレームワークの規約が決める。
+
+ここで区別すべきなのは、同じ「スライス」という言葉で呼ばれやすい2つの単位である。
+
+| 単位 | 意味 | 寿命 | 主な置き場所 |
+|---|---|---|---|
+| **開発スライス** | 今回実装する小さな増分 | 完了後は履歴になる | Issue、PR、`specs/`、受け入れテスト |
+| **業務モジュール／機能領域** | 価格、注文、認証などの安定した責務 | コードとともに存続する | `src/`の恒久的な構造 |
+
+開発スライスのIDを、そのまま本番コードの恒久ディレクトリにしてはいけない。
+
+```
+✗ 過去の開発順序が、そのまま現在のアーキテクチャになる
+
+src/
+├── PRICE-001/
+├── PRICE-002/
+├── PRICE-003/
+└── PRICE-004/
+```
+
+この構成は実装中には分かりやすいが、時間がたつと同じ「価格」という概念が複数フォルダへ分散し、スライス番号を知らなければ変更箇所を発見できなくなる。**履歴を表す単位と、現在のコード構造を表す単位が混ざっている**からである。
+
+**推奨：業務能力を先、ユースケースを次に置くハイブリッド構成**
+
+```text
+repo/
+├── src/
+│   ├── pricing/                         # 安定した業務能力
+│   │   ├── domain/                      # 業務ルールと型
+│   │   │   ├── money.ts
+│   │   │   ├── listing.ts
+│   │   │   └── price.ts
+│   │   ├── usecases/                    # 外向きのユースケース
+│   │   │   ├── register-product/
+│   │   │   │   ├── command.ts
+│   │   │   │   ├── handler.ts
+│   │   │   │   └── validator.ts
+│   │   │   ├── refresh-price/
+│   │   │   │   ├── command.ts
+│   │   │   │   └── handler.ts
+│   │   │   └── show-price-history/
+│   │   │       ├── query.ts
+│   │   │       └── handler.ts
+│   │   ├── ports/                       # DB・外部APIとの契約
+│   │   │   ├── price-provider.ts
+│   │   │   └── price-repository.ts
+│   │   └── adapters/                    # 契約の具体的な実装
+│   │       ├── marketplace-client.ts
+│   │       └── postgres-price-repository.ts
+│   ├── catalog/
+│   ├── notifications/
+│   └── shared/                          # 本当に安定した最小限だけ
+├── tests/
+│   ├── acceptance/pricing/              # スライス・シナリオ単位
+│   │   ├── PRICE-001-register-product.test.ts
+│   │   └── PRICE-002-price-fetch-failure.test.ts
+│   ├── integration/pricing/             # DB・コンポーネント単位
+│   ├── contracts/marketplace/           # 外部境界単位
+│   └── e2e/critical-journeys/           # 少数の重要な利用経路
+└── specs/
+    ├── 001-register-product/             # 開発スライスの履歴
+    └── 002-price-fetch-failure/
+```
+
+この構成では、参照先が質問ごとに分かれる。
+
+| 知りたいこと | 参照先 |
+|---|---|
+| 現在の価格追跡機能はどう作られているか | `src/pricing/` |
+| 価格追跡機能は何を約束しているか | `tests/acceptance/pricing/` |
+| DBや外部APIとの境界は何か | `ports/`、契約テスト |
+| なぜその機能を追加したか | `specs/NNN-feature/`、Git履歴 |
+
+##### クリーンアーキテクチャとの関係
+
+この構成がクリーンアーキテクチャに似て見えるのは正しい。ドメインを中心に置き、DBや外部APIを`ports`と`adapters`の外側へ追い出し、依存性逆転によって業務ロジックをテストしやすくする点を共有している。
+
+ただし、完全に同じではない。
+
+| 観点 | 典型的なクリーンアーキテクチャ | このハイブリッド構成 |
+|---|---|---|
+| 最上位の整理 | `Domain` `Application` `Infrastructure`など技術層 | **`pricing` `orders` `auth`など業務能力** |
+| 1機能の変更 | 複数の技術層フォルダを移動しやすい | まず1つの業務モジュール内で完結させる |
+| 依存ルール | 外側から内側へ依存する | 同じ。業務ロジックは外部技術へ直接依存しない |
+| スライス | 層をまたいで実装する | 業務モジュール内のユースケースとして凝集させる |
+
+> **外側は業務能力で垂直に切り、内側ではクリーンアーキテクチャの依存ルールを使う。** これが両者を組み合わせる要点である。すべてのモジュールに同じ数の層や抽象を強制するのではなく、複雑さがある場所にだけ必要な境界を置く。
+
+##### テストの配置は種類によって変える
+
+前節のテスト管理ツリーは、ファイルシステムをそのまま表すものではない。受け入れテストはシナリオへ、下位テストはそれを所有するコードや境界へ置く。
+
+| テスト | 推奨する配置 | 理由 |
+|---|---|---|
+| **受け入れテスト** | `tests/acceptance/<capability>/` | スライスIDと利用者の約束から探す |
+| **ユニットテスト** | 実装の隣、または`src/`を写した`tests/unit/` | 変更するコードから即座に辿る |
+| **統合テスト** | `tests/integration/<module>/` | DBやアダプターの所有境界を表す |
+| **契約テスト** | `tests/contracts/<provider-or-consumer>/` | サービス間・外部APIの契約を所有する |
+| **E2Eテスト** | `tests/e2e/<critical-journey>/` | 重要な利用経路だけを少数維持する |
+
+言語の標準がコロケーションを支えるなら、ユニットテストを実装の隣へ置いてよい。
+
+```text
+src/pricing/
+├── price-parser.ts
+├── price-parser.test.ts
+├── money.ts
+└── money.test.ts
+```
+
+テストを別成果物としてビルドする言語・フレームワークでは、`src/`と`tests/`を並行させる。
+
+```text
+src/pricing/usecases/refresh-price/handler.cs
+tests/unit/pricing/usecases/refresh-price/handler-tests.cs
+```
+
+どちらを選んでも、**実装からテストへ機械的に辿れる規則**があることが重要。受け入れテスト以外のすべてへスライスIDを重複して付ける必要はない。1つの価格パーサーが複数シナリオを支えるように、実際の対応関係は厳密なツリーではなくグラフになるからである。
+
+##### 独立性はフォルダではなく、契約とゲートで作る
+
+`pricing/`と`orders/`を別フォルダに置いても、互いの内部ファイルを直接importできるなら独立していない。境界を実効的にするには、次を機械的に強制する。
+
+- 各業務モジュールは公開インターフェースを持ち、他モジュールはそれだけを使う
+- 他モジュールの`internal`や`adapters`を直接importしない
+- データと業務ルールの所有者を1つに決める
+- モジュール間のAPI・イベントには契約テストを置く
+- 禁止依存をlinter、ビルドルール、アーキテクチャテストで落とす
+- 大規模チームではディレクトリ単位に`CODEOWNERS`を割り当てる
+
+```
+src/pricing/       → pricingチームが所有
+src/orders/        → ordersチームが所有
+src/auth/          → identityチームが所有
+tests/contracts/   → 関係する双方のチームがレビュー
+```
+
+##### 変更影響は逆依存とテストで機械的に調べる
+
+ディレクトリは「どこから読み始めるか」を示すが、影響範囲を完全には示さない。変更影響は次の順で絞る。
+
+```mermaid
+flowchart LR
+    A["変更対象の業務モジュール"] --> B["同一モジュール内の参照とユニットテスト"]
+    B --> C{"公開契約を変えるか？"}
+    C -- "いいえ" --> D["局所テストと受け入れテスト"]
+    C -- "はい" --> E["逆依存するモジュールを抽出"]
+    E --> F["契約・統合テスト"]
+    F --> G["影響する受け入れ・E2Eテスト"]
+    D --> H["CIで検証"]
+    G --> H
+```
+
+| 変更 | 主な確認範囲 |
+|---|---|
+| 内部の計算ロジック | 同じモジュールのユニットテスト |
+| DB実装 | リポジトリの統合テスト |
+| 公開API・公開型 | 利用側、契約テスト、受け入れテスト |
+| イベント形式 | producer・consumer双方の契約テスト |
+| UI操作フロー | UIテスト、該当する少数のE2E |
+| 共有ライブラリ | 逆依存するすべてのモジュール |
+
+小規模ならLSPの参照検索、型チェック、`rg`、テストで足りる。規模が大きくなったら、ビルドグラフの逆依存、変更ベースのテスト選択、依存グラフをCIへ導入する。**影響範囲を人間の記憶や手書き一覧で管理しない。**
+
+##### `shared/`を安易に増やさない
+
+スライス間に似たコードを見つけるたび`shared/`へ移すと、すべての機能が共有層へ依存し、変更影響が全体へ広がる。共有してよいのは、意味と変更理由が本当に同じものだけ。
+
+| 共有しやすい | 安易に共有しない |
+|---|---|
+| `Money`、`UserID`、`Clock`、共通エラー分類 | たまたま形が同じDTO |
+| 全モジュールが従う安定した不変条件 | 特定画面だけの変換処理 |
+| 技術に依存しない小さな契約 | 1行を短くするだけの`helper` |
+
+> 🔑 **コードは現在の業務構造を表し、`specs/`とGitは開発の経緯を表す。** 開発スライスを履歴側へ、安定した業務能力をコード側へ置き、公開契約・逆依存・テストによって変更影響を機械的に示す。これがVertical Slice、TDD、クリーンアーキテクチャを無理なく組み合わせる構成である。
+
 ### 7.6 粒度と範囲は別物
 
 | 用語 | 意味 |
@@ -1348,6 +1527,12 @@ Naurの読解が投げかける問いです。
 - [Customization – Codex | OpenAI Developers](https://developers.openai.com/codex/concepts/customization)
 - [Custom instructions with AGENTS.md – Codex](https://developers.openai.com/codex/guides/agents-md)
 - [Rules – Codex](https://developers.openai.com/codex/rules)
+- [Feature Slices for ASP.NET Core MVC – Microsoft Learn](https://learn.microsoft.com/en-us/archive/msdn-magazine/2016/september/asp-net-core-feature-slices-for-asp-net-core-mvc)
+- [Test ASP.NET Core MVC apps – Microsoft Learn](https://learn.microsoft.com/en-us/dotnet/architecture/modern-web-apps-azure/test-asp-net-core-mvc-apps)
+- [Data sovereignty per microservice – Microsoft Learn](https://learn.microsoft.com/en-us/dotnet/architecture/microservices/architect-microservice-container-applications/data-sovereignty-per-microservice)
+- [Package testing – The Go Programming Language](https://go.dev/pkg/testing/)
+- [Query guide – Bazel](https://bazel.build/query/guide)
+- [About code owners – GitHub Docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)
 
 ### 論文・プレプリント
 
