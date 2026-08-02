@@ -608,6 +608,76 @@ NIST SP 800-207Aも、application／service identityに基づく認可と、netw
 
 Inspect AIはDockerなどのサンドボックスと実行上限を提供するが、どのファイル、secret、networkを与えるかは利用者の構成に依存する。[Inspect AI: Sandboxing](https://inspect.aisi.org.uk/sandboxing.html)
 
+#### すべてをコンテナ化するのではなく、境界を試す環境をコンテナ化する
+
+このLabの統合テストとAgent Evalは、原則としてDocker Composeとtrialごとの一時コンテナで実行する。ただし、**すべての処理をコンテナへ入れること自体は目的ではない。** 純粋なポリシー関数などの単体テストは通常のローカルプロセスやCIで高速に実行し、通信、認証・認可、状態分離、ネットワーク到達性を検証する段階からコンテナを必須にする。
+
+| テスト層 | 実行場所 | コンテナ方針 | 主に確認すること |
+|---|---|---|---|
+| 単体テスト | 開発端末・CI runner | 必須ではない | ポリシー判定、引数拘束、Scorerなどの決定的ロジック |
+| 結合テスト | Docker Compose | 必須 | Gateway、模擬MCP、Network、ログ、状態の連携 |
+| Agent Eval / E2E | trialごとのSandbox | 必須 | LLM AgentまたはProbeを含む実行経路全体と初期状態の再現 |
+| クラウドLLM | 外部model provider | Labのコンテナ外 | Inspect側だけがAPI通信し、Agentの業務networkと分離する |
+
+#### ステークホルダーごとではなく、信頼境界ごとに分ける
+
+人間のステークホルダーとコンテナを一対一に対応させる必要はない。コンテナは、データ所有者、権限、通信先、侵害時の影響範囲、初期化タイミングが異なる単位で分ける。Identityはコンテナ名で表現せず、trialごとの`sub`、project、scope、resourceを持つtokenで表現する。
+
+例えばProject Aのreader、Project Aのwriter、Project Bのreaderを試すために、三つのAgentコンテナを常時起動する必要はない。同じAgent Sandboxの定義を使い、trialごとに異なるprincipalを与え、終了後にコンテナと状態を破棄する。一方、Project A MCPとProject B MCPはデータ所有境界が異なるため、別コンテナ・別networkにする。
+
+```mermaid
+flowchart LR
+    I["評価Control Plane<br/>Inspect AI"]
+    M["外部<br/>Cloud LLM"]
+    X["Trial Executor<br/>LLM Agent または 非LLM Probe"]
+    G["Go Gateway"]
+    MA["Project A<br/>模擬MCP"]
+    MB["Project B<br/>模擬MCP"]
+    C["Canary Sink"]
+    E["改変不能な評価証拠<br/>trace・log・状態差分"]
+
+    I -->|"trialを作成・破棄"| X
+    I -->|"model API"| M
+    X -->|"agent-net"| G
+    G -->|"project-a-net"| MA
+    G -->|"project-b-net"| MB
+    G -->|"canary-net／試験条件付き"| C
+
+    X -.->|"Inspectがtraceを収集"| E
+    G -.->|"監査log"| E
+    MA -.->|"受信log・最終状態"| E
+    MB -.->|"受信log・最終状態"| E
+    C -.->|"受信log"| E
+```
+
+| コンポーネント | 配置 | 分ける理由 |
+|---|---|---|
+| Inspect AI | ホストまたは独立した評価用コンテナ | 試験の作成・採点、model API key、正解、Canary定義をAgentから隠す |
+| LLM Agent Sandbox | trialごとの一時コンテナ | 前trialのMemory、file、credential、通信状態を残さない |
+| Policy Violation Probe | Agentと同じbase image・Sandbox制約を持つ別trial | Agentと同じprincipal・credential・network条件から禁止経路を決定的に試す |
+| Go Gateway | 独立コンテナ | Agent側networkと接続先networkの間で認可・承認・転送を強制する |
+| Project A模擬MCP | 独立コンテナと`project-a-net` | Project Aのデータ所有境界と受信証拠を独立させる |
+| Project B模擬MCP | 独立コンテナと`project-b-net` | Project Aからの越境とProject B側の受信有無を独立して観測する |
+| Canary Sink | 独立コンテナと専用network | 実在する外部システムへ送らず、流出試行の到達を安全に観測する |
+| 証拠保存 | ホスト管理volumeまたは独立collector | Agent、Probe、Gatewayから過去の証拠を変更・削除させない |
+
+`LLM Agent`と`Policy Violation Probe`は同時に動かす二つのステークホルダーではない。同じbase imageとSandbox定義を使う二つの**実行モード**であり、通常trialではAgent、強制trialではProbeを起動する。Probeの実行ファイルと固定シナリオは強制trialだけにmountし、通常trialのAgentからは読めないようにする。Probeだけを自由に全networkへ接続できる評価用コンテナから実行すると、Agentと異なる条件になるため、境界テストとして無効である。
+
+#### networkを分けなければ、コンテナを分けても境界にならない
+
+Docker Composeでサービスを別コンテナにしても、すべてを同じnetworkへ接続すれば、Agentから模擬MCPへ直接接続できる。最小構成では次のnetworkを分ける。
+
+| network | 接続するもの | Agent／Probeから見た到達性 |
+|---|---|---|
+| `agent-net` | AgentまたはProbe、Gateway | Gatewayだけに到達可能 |
+| `project-a-net` | Gateway、Project A MCP | 直接到達不可。Gateway経由だけ |
+| `project-b-net` | Gateway、Project B MCP | 直接到達不可。Gateway経由だけ |
+| `canary-net` | 許可された試験経路、Canary Sink | シナリオで明示した経路以外は到達不可 |
+
+Gatewayだけを複数networkへ接続し、模擬MCPのportはホストへpublishしない。Agent／Probeには`network_mode: host`、Docker socket、ホストのcredentialを与えない。Docker Composeの`internal` networkは外部接続を分離するために使えるが、同じnetwork内のサービス間認可を代替しない。[Docker Compose: Networking](https://docs.docker.com/compose/how-tos/networking/)
+
+また、コンテナやnetworkは認証・認可の代替ではない。NetworkがProject Bへの直接通信を止めても、GatewayにはProject AのprincipalでProject Bを要求するテストを到達させ、application-levelの拒否を別に確認する。これにより、「Networkが止めたのでGatewayは未試験」という状態を避ける。
+
 ### 6.6 Step 3：Inspect AIでエージェントを受験させる
 
 Inspect AIは、最低限Dataset、SolverまたはAgent、ScorerからなるTaskを定義し、サンドボックス、MCP、承認、実行ログを組み合わせられる。[Inspect AI: Tasks](https://inspect.aisi.org.uk/tasks.html) Agent Bridgeを使えば、独自エージェントやCLIエージェントも評価対象にできる。[Inspect AI: Agent Bridge](https://inspect.aisi.org.uk/agent-bridge.html) したがって、評価ランナーそのものを作らず、次の接着部分に集中する。
@@ -754,6 +824,8 @@ GitHub Actionsはテスト実行とartifact保存に使えるが、GitHub-hosted
 - [ ] 正常・境界・敵対的な12ケースに参照結果がある
 - [ ] エージェントの判断と、Gatewayの強制を別々のscoreで表示できる
 - [ ] 非LLMのPolicy Violation Probeが、エージェントと同じprincipal・credential範囲・network条件で禁止経路を必ず試せる
+- [ ] AgentとProbeを別trialで起動し、同じbase image・Sandbox権限制約を再現できる
+- [ ] `agent-net`と接続先networkを分け、模擬MCPのportをホストへpublishしていない
 - [ ] Gateway、network、模擬MCP、最終状態を同じ`trace_id`で突き合わせられる
 - [ ] 正常系の記録を使い、各層のログ機構が動作中であることを確認できる
 - [ ] セキュリティのCode ScorerがLLM Judgeより常に優先される
@@ -793,7 +865,7 @@ READMEの先頭は機能一覧ではなく、次の問いから始める。
 | 1 | ローカルLLM経験の棚卸し、Labの脅威モデルと非目標を定義 | ケーススタディ、`threat-model.md` |
 | 2 | Project A/Bの権限表、架空データ、正常・禁止ケースを定義 | ポリシー、Dataset、参照結果 |
 | 3 | 模擬MCP、Canary Sink、Go Gateway、非LLMのPolicy Violation Probeを実装 | 決定的な単体・結合テスト |
-| 4 | 承認の引数拘束、多層の構造化ログ、内部ネットワークを実装 | Gateway・network・模擬MCPの相関ログ、通信試験の証拠 |
+| 4 | 承認の引数拘束、多層の構造化ログ、信頼境界ごとの複数networkを実装 | Compose構成図、Gateway・network・模擬MCPの相関ログ、通信試験の証拠 |
 | 5 | Inspect AIのTask、Agent接続、Code Scorerを実装 | 12ケースを1 trial実行したeval log |
 | 6 | 各ケースを5 trial実行し、失敗を分類・修正 | baseline、失敗分析、既知の限界 |
 | 7 | 決定的テストをCI化し、再現手順とartifactを整備 | CI、構成図、再現可能なREADME |
@@ -847,7 +919,7 @@ READMEの先頭は機能一覧ではなく、次の問いから始める。
 | OWASP: Logging Cheat Sheet | https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html |
 | OpenTelemetry: Logs Data Model | https://opentelemetry.io/docs/specs/otel/logs/data-model/ |
 | 警察庁：不正アクセス禁止法の解説 | https://www.npa.go.jp/bureau/cyber/pdf/1_kaisetsu.pdf |
-| Docker Compose: 内部ネットワーク | https://docs.docker.com/compose/how-tos/networking/#internal-networks |
+| Docker Compose: Networkの構成と分離 | https://docs.docker.com/compose/how-tos/networking/ |
 | Docker: 完全なネットワーク分離 | https://docs.docker.com/engine/network/drivers/none/ |
 | GitHub Actions: Workflow artifacts | https://docs.github.com/en/actions/concepts/workflows-and-actions/workflow-artifacts |
 
@@ -892,6 +964,7 @@ mindmap
       撤退条件を先に決める
     個人実践
       模擬組織を作る
+      信頼境界ごとにコンテナ分離
       Go Gatewayで強制
       Inspect AIで受験させる
       証拠と限界を公開する
