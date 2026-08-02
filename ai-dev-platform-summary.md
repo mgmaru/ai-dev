@@ -286,6 +286,16 @@ flowchart TB
 
 ## 6. 個人でできること
 
+### この個人プロジェクトの目的
+
+> **会社固有の利用ルールを、文章で終わらせず、実行時に強制できるポリシーへ変換し、そのポリシーが実際のAIエージェントに対して機能することを自律実行テストで確かめる。この一連の設計・実装・評価を、小さな模擬環境で経験し、再現可能な証拠として残す。**
+
+このプロジェクトの目的は、商用Gatewayや企業全体のAI基盤を一人で作ることでも、少数のテストでAIの安全性を証明することでもない。具体的には、次の三つを身につけ、成果物として示すことである。
+
+1. 「誰が、何を、どの条件で使えるか」を権限表と機械可読なポリシーへ落とす力
+2. PromptやSkillによる**教育**と、Gateway・認可・ネットワークによる**強制**を分けて設計する力
+3. エージェントを実際に動かし、trace、監査ログ、通信、最終的な副作用から合否を判定する力
+
 ### 6.0 見直し後の結論
 
 以前の案は「GoでMCPゲートウェイを作る」までだった。しかし、鍵を作っただけでは、正しい人を通し、不正な人を止め、記録を残せるかは分からない。追記した評価の議論を踏まえると、本命は次の形へ広げるべきである。
@@ -297,22 +307,76 @@ flowchart TB
 ```mermaid
 flowchart LR
     subgraph LAB["Agent Governance Lab"]
-        T["試験施設<br/>Inspect AI"] --> A["社員<br/>AIエージェント"]
-        S["研修・業務手順<br/>Prompt・Skills"] --> A
-        A --> G["警備室<br/>Go Gateway"]
-        G --> MA["Project A<br/>模擬MCP・データ"]
-        G --> MB["Project B<br/>模擬MCP・データ"]
-        G --> C["社外に見立てた<br/>Canary Sink"]
-        N["道路・関所<br/>隔離ネットワーク"] --- A
-        N --- G
-        G --> L["入退館記録<br/>監査ログ"]
-        MA --> E["結果確認<br/>Code Scorer"]
-        MB --> E
-        C --> E
-        L --> E
-        E --> T
+        direction LR
+
+        subgraph EVAL["評価側：テストを実行・採点する"]
+            T["試験運営<br/>Inspect AI"]:::evaluator
+            E["結果確認<br/>Code Scorer"]:::evaluator
+        end
+
+        S["ルール・手順<br/>Prompt・Skills"]:::instruction
+
+        subgraph TARGET["テスト対象"]
+            A["判断<br/>AIエージェント"]:::agentTarget
+            G["認可・承認<br/>Go Gateway"]:::controlTarget
+            N{"通信先を判定<br/>隔離ネットワーク"}:::controlTarget
+        end
+
+        subgraph WORLD["架空の接続先・テストデータ"]
+            MA["Project A<br/>模擬MCP・データ"]:::fixture
+            MB["Project B<br/>模擬MCP・データ"]:::fixture
+            C["社外に見立てた<br/>Canary Sink"]:::fixture
+        end
+
+        L["観測証拠<br/>監査・通信ログ"]:::evidence
+
+        T -->|"① 試験課題を与える"| A
+        S -.->|"判断ルールを与える"| A
+        A -->|"② MCP・tool呼び出し"| G
+        A -->|"②' 直接通信の試行"| N
+        G -->|"③ 認可後の接続要求"| N
+        N -->|"④ 許可された場合だけ到達"| MA
+        N -->|"④ 許可された場合だけ到達"| MB
+        N -->|"④ テスト条件に応じて到達"| C
+
+        A -.->|"tool trace"| E
+        G -.->|"認可・承認ログ"| L
+        N -.->|"通信ログ"| L
+        MA -.->|"最終状態"| E
+        MB -.->|"最終状態"| E
+        C -.->|"受信有無"| E
+        L -.->|"観測結果"| E
+        E -.->|"⑤ score"| T
     end
+
+    classDef agentTarget fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:3px
+    classDef controlTarget fill:#ffedd5,stroke:#ea580c,color:#431407,stroke-width:3px
+    classDef fixture fill:#dcfce7,stroke:#16a34a,color:#052e16,stroke-width:2px
+    classDef evaluator fill:#f3e8ff,stroke:#9333ea,color:#3b0764,stroke-width:2px
+    classDef instruction fill:#fef9c3,stroke:#ca8a04,color:#422006,stroke-width:2px
+    classDef evidence fill:#f3f4f6,stroke:#4b5563,color:#111827,stroke-width:2px
+
+    style TARGET fill:#fff7ed,stroke:#f97316,stroke-width:3px,stroke-dasharray:6 4
+    style EVAL fill:#faf5ff,stroke:#a855f7,stroke-width:2px
+    style WORLD fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
 ```
+
+この図は、パケット単位のデータフロー図ではなく、**テストの実行・アクセス制御フローと、採点に使う証拠の収集経路**を示している。応答データは要求と逆向きに同じ経路を戻るが、図を複雑にしないため省略している。
+
+#### 凡例
+
+| 表現 | 意味 |
+|---|---|
+| 青いノード | **判断のテスト対象**。AIエージェントが適切なtoolを選び、ルールを自発的に守るかを測る |
+| オレンジのノード | **強制機構のテスト対象**。エージェントが不適切な要求を選んでも、Gatewayとネットワークが止めるかを測る |
+| 緑のノード | 架空の接続先とテストデータ。実在する社内・外部システムは使用しない |
+| 紫のノード | 評価を実行・採点する側。原則としてテスト対象には含めない |
+| 黄色のノード | エージェントへ与えるルールと業務手順 |
+| 灰色のノード | 合否判定に利用する観測証拠 |
+| 実線の矢印 | 番号順に進む、課題実行・tool呼び出し・アクセス要求・通信の主経路 |
+| 破線の矢印 | ルールの入力、trace・ログ・最終状態・scoreなど、設定と評価証拠の経路 |
+
+テスト対象は、青い**AIエージェント**と、オレンジの**Go Gateway・隔離ネットワーク**である。ただし合否は一つにまとめず、「エージェントが正しく判断したか」と「誤った判断を強制機構が止めたか」を別々に記録する。
 
 この構成なら、次の三つを一つの成果物で説明できる。
 
