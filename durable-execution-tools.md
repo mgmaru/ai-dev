@@ -18,9 +18,33 @@
 
 ---
 
-## 1. 表の読み方 — 5つの分類軸
+## 1. 表の読み方 — 6つの分類軸
 
-### 軸1. 実装方式
+### 軸1. 種別 — 実行基盤をどこに持つか
+
+**初版ではこの列の定義を書いていませんでした。しかも値の粒度が揃っていませんでした。** 3つの異なる観点が混ざっていたためです。
+
+| 混ざっていた観点 | 初版で使っていた値 |
+|---|---|
+| デプロイ形態 | 汎用エンジン、ライブラリ、サイドカー、マネージド |
+| 出自・立ち位置 | オーケストレータ、エージェントランタイム、エージェント FW |
+| 提供形態 | マネージド寄り、SDK＋マネージド、コンポーネント |
+
+これを **「実行基盤をどこに持つか」という単一の軸**に整理し直します。値は4つです。
+
+| 種別 | 定義 | あなたが立てて運用するもの | 判別の質問 |
+|---|---|---|---|
+| **セルフホスト型エンジン** | ワークフローの進捗を管理する**専用のサーバプロセス**が存在し、それを自分で立てる | エンジン本体（＋必要なら DB / Kafka） | 「`docker compose up` する対象があるか？」 |
+| **埋め込みライブラリ型** | **専用サーバが存在しない。** アプリのプロセス内でライブラリとして動き、状態は既存の DB に書く | 何も（既存 DB のみ） | 「`pip install` / `npm install` だけで完結するか？」 |
+| **サイドカー型** | アプリの隣に**汎用ランタイム**が並走し、その機能の1つとしてワークフローが提供される | サイドカープロセス | 「ワークフロー専用ではない基盤の一機能か？」 |
+| **マネージド型** | ベンダのサービス。**自前ホストという選択肢がそもそもない** | 何も | 「自分で動かす手段があるか？ 無ければ該当」 |
+
+**注意点が2つあります。**
+
+1. **種別と「OSS か商用か」は独立した軸です。** セルフホスト型でもライセンスが OSI 準拠でないもの（LittleHorse）があり、マネージド型でも SDK は OSS のもの（Azure Durable Task SDKs）があります。混ぜると誤ります。
+2. **多くの製品が「セルフホスト型エンジン ＋ 公式マネージド」の両方を提供しています。** 表では**自前ホストできるか**を基準に分類しました。マネージドしか使わないつもりでも、この区別は**「将来引き剥がせるか」**を決めます。
+
+### 軸2. 実装方式
 
 入門編 §10 で挙げた2方式に、1つ足して3つです。
 
@@ -34,7 +58,7 @@
 
 代わりに失うものもあります。リプレイ方式は「コードそのものが状態」なので状態管理コードが一行も要らないのに対し、チェックポイント方式は「どこまで進んだか」を明示的に持つ必要があり、ステップ境界がフレームワークの形（グラフのノードなど）に縛られがちです。
 
-### 軸2. コードがどこで動くか — pull か push か
+### 軸3. コードがどこで動くか — pull か push か
 
 **これが serverless 適性と待機コストを決めます。**
 
@@ -45,7 +69,7 @@
 
 Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入門編 §9.3 の「待機中のコストが60〜80%下がる」は push 型でより極端に効きます。**
 
-### 軸3. 状態をどこに置くか
+### 軸4. 状態をどこに置くか
 
 | 置き場所 | 運用負荷 | 代表 |
 |---|---|---|
@@ -54,7 +78,7 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 | **既存の Postgres だけ** | **最小** | DBOS、Hatchet |
 | ベンダのマネージド | ゼロ（ただしロックイン） | Cloudflare、AWS、Azure、Upstash |
 
-### 軸4. ライセンス
+### 軸5. ライセンス
 
 「OSS」と書いてあっても中身が違います。
 
@@ -64,43 +88,186 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 
 商用配布や SaaS 提供を考えるなら BSL / SSPL は必ず原文を読んでください。
 
-### 軸5. 「durable execution なのか」
+### 軸6. 「durable execution なのか」
 
-最後に、**そもそもこのカテゴリに入らないもの**を分けます（→ §6）。
+最後に、**そもそもこのカテゴリに入らないもの**を分けます（→ §8）。
+
+**このほか、操作インタフェース（→ §3）と費用（→ §4）を独立した章として扱います。** どちらも「二択で見ると判断を誤る」性質があるためです。
 
 ---
 
 ## 2. 全体マップ
 
-| # | 名前 | 種別 | 実装方式 | 状態の置き場所 | 主な言語 | ライセンス / 自前ホスト |
+種別・UI・料金を1つの表に詰めると読めなくなるため、**UI は §3、料金は §4 に分離**しています。
+
+| # | 名前 | 種別 | 実装方式 | 状態の置き場所 | 主な言語 | ライセンス |
 |---|---|---|---|---|---|---|
-| 1 | **Temporal** | 汎用エンジン | ジャーナルリプレイ（pull） | 専用クラスタ＋DB | Go, Java, Python, TS, .NET, PHP, Ruby | MIT ／ 可 |
-| 2 | **Restate** | 汎用エンジン | ジャーナルリプレイ（push） | 単一バイナリ | TS, Java/Kotlin, Python, Go, Rust | BSL 1.1（SDK は MIT）／ 可 |
-| 3 | **DBOS Transact** | ライブラリ | DB チェックポイント | 既存 Postgres | Python, TS, Go, Java, Kotlin | MIT ／ 可（サーバ不要） |
-| 4 | **Hatchet** | エンジン＋キュー | 耐久イベントログ | Postgres | Python, TS, Go, Ruby | MIT ／ 可 |
-| 5 | **Inngest** | エンジン | ジャーナル（push / イベント駆動） | Inngest（or 自前 Redis+PG） | TS, Python, Go | SSPL→Apache 2.0 ／ 可 |
-| 6 | **Trigger.dev** | マネージド寄り | チェックポイント／再開 | Trigger.dev（or 自前 PG） | TypeScript（Python は補助） | Apache 2.0 ／ 可 |
-| 7 | **Resonate** | 汎用エンジン | ジャーナル（distributed async await） | 単一バイナリ（SQLite / PG） | TS, Python, Go, Rust, Java | Apache 2.0 ／ 可 |
-| 8 | **Golem** | エージェントランタイム | **透過的スナップショット（WASM）** | Golem ランタイム | WASM に載る言語（TS 等） | BUSL-1.1→Apache 2 ／ 可 |
-| 9 | **Conductor (OSS/Orkes)** | オーケストレータ | タスク＋ワーカー、全履歴永続化 | Redis / PG / MySQL / Cassandra / SQLite | Java, Python, Go, JS, C#, Ruby, Rust | Apache 2.0 ／ 可 |
-| 10 | **LittleHorse** | エンジン | Kafka を write-ahead log に | Kafka | Java, Go, Python, C# | source-available（SDK は Apache 2.0）／ 可 |
-| 11 | **Dapr Workflows / Agents** | サイドカー | ジャーナルリプレイ（Durable Task 系） | 差し替え可能な state store | Python, JS, .NET, Java, Go | Apache 2.0（CNCF）／ 可 |
-| 12 | **AWS Lambda Durable Functions** | マネージド | ジャーナルリプレイ | AWS 管理 | Node.js, Python, Java, .NET | 商用 ／ 不可 |
-| 13 | **AWS Step Functions** | マネージド | 状態機械（JSON/ASL） | AWS 管理 | 言語非依存（JSON 定義） | 商用 ／ 不可 |
-| 14 | **Azure Durable Functions / Durable Task SDKs** | マネージド | イベントソーシング＋リプレイ | Durable Task Scheduler 等 | .NET, Python, Java, JS, PowerShell | 商用（SDK は OSS）／ 一部可 |
-| 15 | **Cloudflare Workflows** | マネージド | ジャーナルリプレイ | Cloudflare 管理 | TypeScript（Python ベータ） | 商用 ／ 不可 |
-| 16 | **Vercel Workflows / Workflow DevKit** | SDK＋マネージド | ジャーナル（`"use workflow"`） | 「World」アダプタ次第 | TypeScript, Python（ベータ） | OSS SDK ／ 可（PG 実装あり） |
-| 17 | **Upstash Workflow** | マネージド | ステップメモ化（push / HTTP） | Upstash（QStash） | TypeScript, Python | 商用 ／ 不可 |
-| 18 | **Convex Workflow** | コンポーネント | DB チェックポイント | Convex DB | TypeScript | OSS コンポーネント ／ Convex 前提 |
-| 19 | **LangGraph** | エージェント FW | DB チェックポイント | Postgres / Redis / DynamoDB 等 | Python, JS/TS | OSS ／ 可 |
+| 1 | **Temporal** | セルフホスト型エンジン（＋公式マネージド） | ジャーナルリプレイ（pull） | 専用クラスタ＋DB | Go, Java, Python, TS, .NET, PHP, Ruby | MIT |
+| 2 | **Restate** | セルフホスト型エンジン（＋公式マネージド） | ジャーナルリプレイ（push） | 単一バイナリ | TS, Java/Kotlin, Python, Go, Rust | BSL 1.1（SDK は MIT） |
+| 3 | **DBOS Transact** | **埋め込みライブラリ型** | DB チェックポイント | 既存 Postgres | Python, TS, Go, Java, Kotlin | MIT |
+| 4 | **Hatchet** | セルフホスト型エンジン（＋公式マネージド） | 耐久イベントログ | Postgres | Python, TS, Go, Ruby | MIT |
+| 5 | **Inngest** | セルフホスト型エンジン（＋公式マネージド） | ジャーナル（push / イベント駆動） | Inngest（or 自前 Redis+PG） | TS, Python, Go | SSPL→Apache 2.0 |
+| 6 | **Trigger.dev** | セルフホスト型エンジン（＋公式マネージド） | チェックポイント／再開 | Trigger.dev（or 自前 PG） | TypeScript（Python は補助） | Apache 2.0 |
+| 7 | **Resonate** | セルフホスト型エンジン | ジャーナル（distributed async await） | 単一バイナリ（SQLite / PG） | TS, Python, Go, Rust, Java | Apache 2.0 |
+| 8 | **Golem** | セルフホスト型エンジン（＋マネージド:Preview） | **透過的スナップショット（WASM）** | Golem ランタイム | WASM に載る言語（TS 等） | BUSL-1.1→Apache 2 |
+| 9 | **Conductor (OSS/Orkes)** | セルフホスト型エンジン（＋Orkes マネージド） | タスク＋ワーカー、全履歴永続化 | Redis / PG / MySQL / Cassandra / SQLite | Java, Python, Go, JS, C#, Ruby, Rust | Apache 2.0 |
+| 10 | **LittleHorse** | セルフホスト型エンジン（＋Cloud） | Kafka を write-ahead log に | Kafka | Java, Go, Python, C# | source-available（SDK は Apache 2.0） |
+| 11 | **Dapr Workflows / Agents** | **サイドカー型** | ジャーナルリプレイ（Durable Task 系） | 差し替え可能な state store | Python, JS, .NET, Java, Go | Apache 2.0（CNCF） |
+| 12 | **AWS Lambda Durable Functions** | マネージド型 | ジャーナルリプレイ | AWS 管理 | Node.js, Python, Java, .NET | 商用 |
+| 13 | **AWS Step Functions** | マネージド型 | 状態機械（JSON/ASL） | AWS 管理 | 言語非依存（JSON 定義） | 商用 |
+| 14 | **Azure Durable Functions / Durable Task SDKs** | マネージド型（SDK は埋め込み可、バックエンドは Azure） | イベントソーシング＋リプレイ | Durable Task Scheduler 等 | .NET, Python, Java, JS, PowerShell | 商用（SDK は OSS） |
+| 15 | **Cloudflare Workflows** | マネージド型 | ジャーナルリプレイ | Cloudflare 管理 | TypeScript（Python ベータ） | 商用 |
+| 16 | **Vercel Workflows / Workflow DevKit** | **埋め込みライブラリ型 ＋ マネージド型** | ジャーナル（`"use workflow"`） | 「World」アダプタ次第 | TypeScript, Python（ベータ） | OSS SDK |
+| 17 | **Upstash Workflow** | マネージド型 | ステップメモ化（push / HTTP） | Upstash（QStash） | TypeScript, Python | 商用 |
+| 18 | **Convex Workflow** | マネージド型（Convex 基盤前提） | DB チェックポイント | Convex DB | TypeScript | OSS コンポーネント |
+| 19 | **LangGraph** | **埋め込みライブラリ型** | DB チェックポイント | Postgres / Redis / DynamoDB 等 | Python, JS/TS | OSS |
 
 ---
 
-## 3. カテゴリA — 自前ホストできる汎用エンジン
+## 3. 操作インタフェース — 定義方法 / 監視 UI / CLI
+
+### 3.1 まず、軸の取り方について
+
+> **「GUI か CLI か」は、この分野では二択になりません。**
+
+理由は単純で、**ほぼすべての製品が両方持っているからです。** 実際に調べたところ、監視用の Web UI を持たないのは **Resonate だけ**（意図的にダッシュボードを作らない方針）、CLI が主たる操作手段でないのは一部のマネージドサービスだけでした。**この問いでは製品が絞れません。**
+
+知りたいことは、おそらく「**どうやって触るのか／学習コストはどこにかかるのか**」だと思います。それなら**3つの層に分ける**のが正しい切り方です。
+
+| 層 | 問い | 製品間の差 |
+|---|---|---|
+| **① 定義** | ワークフローを**何で書くか** | **決定的。ここだけが選定を左右する** |
+| **② 監視・運用 UI** | 走っているワークフローを**どう見るか** | ほぼ全製品にある。差は小さい |
+| **③ CLI** | 開発・デプロイ・復旧を**どう操作するか** | ほぼ全製品にある。差は小さい |
+
+### 3.2 一覧
+
+| 製品 | ① 定義方法 | ② 監視・運用 UI | ③ CLI |
+|---|---|---|---|
+| **Temporal** | コード | **Temporal Web UI**（OSS に同梱） | `temporal` |
+| **Restate** | コード | **内蔵 UI**（管理 API :9070） | `restate` |
+| **DBOS** | コード（デコレータ注釈） | **Conductor**（有償／自前ホスト可）。OSS では第三者製 Argus（read-only） | `dbos workflow list / cancel / resume` |
+| **Hatchet** | コード | Web UI（自前ホストに同梱、:8080） | `hatchet`（**`hatchet tui` でターミナル UI**、`worker dev`、`profile`） |
+| **Inngest** | コード | Dev Server UI（ローカル）＋ Cloud ダッシュボード | `inngest-cli dev` |
+| **Trigger.dev** | コード | ダッシュボード（実行のリプレイ操作あり） | `trigger.dev`（別デプロイ） |
+| **Resonate** | コード | **なし（意図的にダッシュボードを作らない方針）** | `resonate`（`tree` で呼び出しグラフ、`promises get`、`serve`） |
+| **Golem** | コード（WASM コンポーネント） | Golem Console | `golem` |
+| **Conductor / Orkes** | **ビジュアルビルダー（ドラッグ&ドロップ）／ JSON ／ SDK** | UI（実行の可視化・再実行） | `@conductor-oss/conductor-cli` |
+| **LittleHorse** | コード | **Dashboard**（有向グラフを可視化、UI から実行も可） | `lhctl` |
+| **Dapr** | コード | Dapr Dashboard | `dapr` |
+| **AWS Lambda Durable Functions** | コード | AWS Console / CloudWatch | AWS CLI / SAM / CDK |
+| **AWS Step Functions** | **Workflow Studio（ビジュアル）／ ASL(JSON)** | AWS Console | AWS CLI |
+| **Azure Durable Functions** | コード | **Durable Task Scheduler ダッシュボード** | Azure CLI / `func` / VS Code 拡張 |
+| **Cloudflare Workflows** | コード | Cloudflare ダッシュボード | `wrangler` |
+| **Vercel Workflows** | コード（`"use workflow"` ディレクティブ） | Vercel ダッシュボードの Workflows ページ | `vercel` |
+| **Upstash Workflow** | コード | Upstash コンソール（実行の可視化） | （コンソール中心） |
+| **Convex Workflow** | コード | Convex ダッシュボード | `convex` |
+| **LangGraph** | コード（グラフ定義） | **LangGraph Studio** ＋ LangSmith | `langgraph` |
+
+### 3.3 結論 — 差がつくのは「定義方法」だけ
+
+**19製品のうち、GUI でワークフローを定義できるのは2つだけです。**
+
+| 製品 | GUI での定義 | 裏側の表現 |
+|---|---|---|
+| **Orkes Conductor** | ドラッグ&ドロップのビジュアルビルダー | JSON |
+| **AWS Step Functions** | Workflow Studio | ASL（JSON） |
+
+**そしてこの2つは、どちらも出自が iPaaS / サービスオーケストレーション寄りです。**
+
+> **入門編 §12.2 の「iPaaS は GUI、durable execution はコード」という線引きは、調査してみるとほぼ例外なく成立していました。**
+
+裏を返すと、**durable execution を導入するとは「ワークフローをコードで書く」を受け入れることです。** GUI で組みたいなら、それは iPaaS を選ぶべき場面かもしれません（入門編 §12.2 の使い分け表）。
+
+### 3.4 例外的に面白い2つ
+
+- **Resonate は、意図的にダッシュボードを持ちません。** 「ワークフローが何をしているか知りたければ CLI に聞く」という方針で、`resonate tree` が呼び出しグラフ全体を、`resonate promises get` が個別ステップを出します。立ち上げるダッシュボードも、専有コンソールも無い、という設計判断です。
+- **Hatchet には TUI があります。** `hatchet tui` でターミナル内にタスク・ワークフロー・ワーカーのリアルタイム可観測性が出ます。Web UI を開かずに済ませたい人向け。
+
+---
+
+## 4. 料金 — 3費目に分解する
+
+### 4.1 まず、「無料か有料か」で見ると誤ります
+
+durable execution の費用は、**独立した3費目**に分解しないと比較できません。
+
+| 費目 | 内容 | OSS を自前ホストした場合 |
+|---|---|---|
+| **① ライセンス料** | ソフトウェアそのもの | **ゼロ** |
+| **② マネージド利用料** | ベンダのサービス | **ゼロ**（使わないので） |
+| **③ インフラ費 ＋ 運用工数** | サーバ、DB、監視、アップグレード、障害対応 | **ここに全部乗る** |
+
+**「OSS だから無料」は ① だけを見た話です。**
+
+具体的に言うと、Temporal を自前ホストするとライセンス料は0円ですが、**Cassandra または PostgreSQL、Elasticsearch、frontend / history / matching / worker の4コンポーネント**を運用することになります。一方 DBOS なら、追加で運用するものは**何もありません**（既存の Postgres に書くだけ）。
+
+> **同じ「無料」でも、③ が桁で違います。** これが §1 軸1（種別）が費用に直結する理由です。**種別を見れば、③ のおおよそが分かります。**
+
+### 4.2 一覧
+
+| 製品 | ① 自前ホスト | ② マネージドの無料枠 | ② 最低月額 | ② 従量課金 |
+|---|---|---|---|---|
+| **Temporal** | 無料（MIT。Service / SDK / CLI / UI 込み） | $1,000 クレジット | **$100**（Essentials: 100万 Action、1GB Active、40GB Retained）／ Business $500 | $50 / 100万 Action（〜5M。2億超で $25）。Active $0.042/GBh、Retained $0.00105/GBh |
+| **Restate** | 無料（runtime BSL、SDK MIT） | **5万 Action / 月** | 要問合せ | Action 従量 |
+| **DBOS** | 無料（MIT） | ライブラリ自体が無料 | **Pro $99**（2席 / 3アプリ / 100万チェックポイント）／ Teams $499（10席 / 10アプリ / 1000万） | 追加チェックポイント $50 / 100万（Pro）、$40 / 100万（Teams） |
+| **Hatchet** | 無料（MIT） | **10万タスク実行** | Team $500 ／ Scale $1,000 | **$10 / 100万タスク実行** |
+| **Inngest** | 無料（SSPL→Apache 2.0） | Hobby: **5万 executions / 月**、5並列 | **Pro $99**（100万 executions、100+並列） | $25 / 25並列追加、$0.50 / 100万イベント、$3/GB span |
+| **Trigger.dev** | **無料（Apache 2.0。機能制限・実行数制限なし）** | Free $0（$5 クレジット、20並列） | Hobby $10 ／ Pro $50 | 計算 $0.0000169〜0.00068 / 秒（マシン別）＋ 起動 $0.000025 / run |
+| **Resonate** | 無料（Apache 2.0） | — | — | — |
+| **Golem** | 無料（BUSL-1.1） | **Developer Preview 全体が無料**（SLA・データ保持保証なし） | 未定（有償 GA は2026年Q3予定） | GCU 等4次元の従量。月額基本料なし |
+| **Conductor / Orkes** | 無料（Apache 2.0） | Orkes Developer Edition が無料（**本番非推奨**、SLA なし） | 要問合せ | — |
+| **LittleHorse** | サーバは source-available（商用条件を要確認） | — | 商用 | — |
+| **Dapr** | 無料（CNCF / Apache 2.0） | — | — | — |
+| **AWS Lambda Durable Functions** | 不可 | Lambda 無料枠のみ | 月額基本料なし | **durable operation $8.00 / 100万**、書き込み **$0.25/GB**、保持 **$0.15/GB月** ＋ 通常の Lambda 課金 |
+| **AWS Step Functions** | 不可 | 4,000 state transitions / 月 | 月額基本料なし | **$25 / 100万 state transitions** |
+| **Azure Durable Functions** | SDK は任意基盤で可（バックエンドは Azure） | — | Consumption: 最低コミットなし | Consumption は dispatch された action 従量。Dedicated は CU 単位（1CU = 最大2,000 action/秒、50GB） |
+| **Cloudflare Workflows** | 不可 | 無料プラン **3,000ステップ / 日** | Workers Paid **$5** | **2026年8月10日〜: 有料プランは月50万ステップ込み、超過 $0.80 / 10万ステップ** |
+| **Vercel Workflows** | **可（Postgres 参照実装）** | Hobby: **5万イベント / 月** ＋ 書き込み 1GB（保持は不可） | Pro $20 / 人 | **$0.02 / 1,000イベント**、書き込み $0.50/GB、保持 $0.50/GB月 ＋ Functions / Queues 課金 |
+| **Upstash Workflow** | 不可 | 無料枠あり | **月額基本料なし** | **$1 / 10万ステップ** |
+| **Convex Workflow** | Convex 基盤前提 | Convex 無料枠 | Convex 料金に準拠 | — |
+| **LangGraph** | 無料（OSS） | Platform Developer 無料 | **Plus $39 / 席**（LangSmith Plus 込み） | $0.005 / run、本番稼働 $0.0036 / 分、開発 $0.0007 / 分 |
+
+### 4.3 課金単位の罠 — 同じワークフローでも桁が変わる
+
+**「1回いくら」を比べても意味がありません。何を1と数えるかが製品ごとに違うからです。**
+
+10ステップのワークフローを1回動かした場合:
+
+| 製品 | 課金単位 | 数え方 | 概算 |
+|---|---|---|---|
+| **Vercel Workflows** | **イベント** | 1ステップ = 3イベント（`step_created` / `step_started` / `step_completed`）。リトライすると `step_retrying` が追加 | **約30イベント** |
+| **Inngest** | **execution** | run 1 ＋ 各 step | **11 executions** |
+| **Cloudflare Workflows** | **ステップ** | `step.do` はもちろん、**sleep もイベント待ちも1ステップ** | **10ステップ＋待機分** |
+| **AWS Lambda Durable Functions** | **durable operation** | step / wait / checkpoint | **10前後** ＋ 通常の Lambda 課金 |
+| **Temporal** | **Action** | ワークフロー開始、Activity 実行、タイマー等 | — |
+
+### 4.4 入門編 §6.1 と直結する話
+
+> **入門編 §6.1 の「ステップの粒度は開発者が決める」が、そのまま請求額に直結します。**
+
+入門編ではこう書きました。
+
+> 細かくすれば失う作業は少なくなりますが、履歴への書き込みが増えます。
+
+**マネージドを使うなら、この「履歴への書き込みが増えます」は直接お金の話です。** クラッシュ時に失う作業量と請求額のトレードオフになります。
+
+特に注意すべきは **Cloudflare Workflows で、2026年8月10日以降は sleep も1ステップとして課金されます。** 入門編 §5.2 で「3日待つ」がコスト0で書けると説明した設計と、コストが衝突しうる点に留意してください（計算リソースは確かに0ですが、ステップ課金は発生します）。
+
+### 4.5 実務的な目安
+
+- **評価・PoC 段階なら、ほぼ全製品が無料枠で足ります。** Temporal Cloud は$1,000クレジット、Restate Cloud は5万アクション/月、Inngest は5万executions/月、Hatchet は10万タスク実行、Vercel Workflows は5万イベント/月。
+- **月額固定費ゼロで始められるのは Upstash Workflow（$1/10万ステップ、基本料なし）と Trigger.dev（Free $0）**、および OSS の自前ホスト全般。
+- **チーム開発に入ると席課金が効いてきます。** DBOS Pro は2席まで、LangGraph Platform Plus は $39/席、Trigger.dev Pro は25席込みで以降 $20/席。**製品単価より席数で決まることがあります。**
+- **自前ホストの「無料」で最も強いのは Trigger.dev です。** Apache 2.0 で、Docker + Postgres により**機能制限も実行数制限もなく**全機能を自前ホストできます。マネージド系のなかでは異例。
+
+---
+
+## 5. カテゴリA — 自前ホストできる汎用エンジン
 
 ここが本命です。**言語もインフラも自分で選べる代わりに、運用は自分の仕事になります。**
 
-### 3.1 Temporal
+### 5.1 Temporal
 
 | 項目 | 内容 |
 |---|---|
@@ -120,7 +287,7 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 
 > **「durable execution を検討する」= まず Temporal を評価軸に置く、で当面は間違いになりません。** 他を選ぶ理由は、たいてい「Temporal ほどの重さが要らない」です。
 
-### 3.2 Restate
+### 5.2 Restate
 
 | 項目 | 内容 |
 |---|---|
@@ -138,11 +305,11 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - push 型なので **serverless にそのまま載ります。** ワーカー常駐が要らない。
 - 成熟度と実績は Temporal に劣ります。BSL も要確認事項です。
 
-### 3.3 DBOS Transact
+### 5.3 DBOS Transact
 
 | 項目 | 内容 |
 |---|---|
-| ライセンス | **MIT**。DBOS Pro（Conductor UI 等）が有償 |
+| ライセンス | **MIT**。DBOS Pro（$99/月〜、Conductor UI 等）が有償 |
 | SDK | Python, TypeScript, Go, Java, Kotlin |
 | 構成 | **サーバなし。アプリ内のライブラリ。** 状態は既存の Postgres |
 | 実行モデル | in-process |
@@ -156,7 +323,7 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - Pydantic AI が公式に統合をドキュメント化しています（Temporal、Prefect と並んで）。
 - 弱点は、**ライブラリなのでプロセス外の監督者がいない**こと。アプリが全滅したら誰も再開させません（別プロセスの recovery 機構は用意されているが、Temporal のような独立クラスタとは前提が違う）。また Postgres がそのままスケール上限になります。
 
-### 3.4 Hatchet
+### 5.4 Hatchet
 
 | 項目 | 内容 |
 |---|---|
@@ -170,9 +337,9 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - 出自がタスクキューなので、**キュー側の機能が厚い**。優先度、レート制限（動的レート制限を含む）、concurrency ポリシーによる fair scheduling、ワーカーラベルによるルーティング、マルチテナンシ。
 - durable task と DAG の両方を持ち、**耐久 sleep とイベント待ちを組み合わせた複雑な pause/resume 条件**が書ける。
 - 入門編 §10 の指摘どおり **通常タスクは at-least-once** なので、冪等性は自分の仕事です。
-- Postgres だけで動くので自前ホストが容易。Cloud は10万タスク実行まで無料、以降 $10 / 100万実行。
+- Postgres だけで動くので自前ホストが容易。**`hatchet tui` によるターミナル UI** があるのも地味に効きます。
 
-### 3.5 Inngest
+### 5.5 Inngest
 
 | 項目 | 内容 |
 |---|---|
@@ -189,7 +356,7 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - **sleep 中は concurrency 枠を消費しません。** アイドルが安い。
 - 注意: 「Inngest は自前ホストできない」と書いた比較記事が複数流通していますが、**Inngest 1.0 で自前ホストは公式にサポートされています。** 二次情報のライセンス／自前ホスト可否は当てになりません。
 
-### 3.6 Resonate
+### 5.6 Resonate
 
 | 項目 | 内容 |
 |---|---|
@@ -197,6 +364,7 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 | SDK | TypeScript, Python, Go, Rust, Java |
 | 構成 | **単一バイナリ**。デフォルト SQLite、Postgres も可 |
 | モデル | **Distributed Async Await** — 言語・トランスポート非依存のプロトコル |
+| UI | **なし。CLI 優先の方針**（§3.4） |
 
 **特徴**
 
@@ -204,13 +372,13 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - サーバはワーカーの **supervisor 兼 orchestrator** として振る舞う。
 - 規模と実績は小さいので、本番採用は評価前提で。
 
-### 3.7 Golem
+### 5.7 Golem
 
 | 項目 | 内容 |
 |---|---|
 | ライセンス | **BUSL-1.1**（Apache 2 へ移行予定） |
 | 実行単位 | **WebAssembly コンポーネント**（専用実行エンジン） |
-| 現況 | Cloud は Developer Preview、有償 GA は2026年Q3予定 |
+| 現況 | Cloud は Developer Preview（**無料、SLA・データ保持保証なし**）、有償 GA は2026年Q3予定 |
 
 **特徴**
 
@@ -219,23 +387,23 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - ツール／ネットワーク／ファイルへのアクセスは**明示的な grant** で、プロンプトインジェクションで権限昇格できず、quota はランタイムが強制し、**すべての grant がジャーナルされる**。durable execution とサンドボックス隔離を同じ機構で解こうとしている。
 - 代償は、**WASM に載せられるものしか動かない**こと。既存の Python 資産をそのまま持ち込むような使い方には向きません。
 
-### 3.8 Conductor（OSS / Orkes）
+### 5.8 Conductor（OSS / Orkes）
 
 | 項目 | 内容 |
 |---|---|
 | ライセンス | **Apache 2.0**（Orkes が主要メンテナ、SaaS も提供） |
 | SDK | Java, Python, Go, JavaScript, C#, Ruby, Rust ＋ HTTP が話せれば任意言語 |
 | 永続化 | **Redis / PostgreSQL / MySQL / Cassandra / SQLite から選択** |
-| 定義 | **JSON ベース**のワークフロー定義（コードではない） |
+| 定義 | **ビジュアルビルダー／ JSON ／ SDK**（→ §3.3） |
 
 **特徴**
 
 - Netflix 発。**タスクとワーカーを明示的に分離する**古典的オーケストレーション。実績規模は月10億ワークフロー級。
 - **実行履歴を無期限に保持し、「最初からやり直す／任意のタスクから再実行する／失敗したステップだけリトライする」を数か月後でも実行できる。** 入門編 §7.3 の「補償処理を書けるようになる」が、運用 UI のレベルで提供されている。
 - AI 向けが手厚い。LLM タスク（chat/text completion）、MCP のツール呼び出し、human-in-the-loop 承認、**エージェントが実行時に生成する動的ワークフロー**。プロバイダは Anthropic / OpenAI / Azure OpenAI / Gemini / Bedrock / Mistral / Cohere / HuggingFace / Ollama など14以上をネイティブ統合。
-- コードではなく JSON 定義なので、**入門編 §12.2 の「git diff でレビューできる」という利点は半減**します。iPaaS と durable execution の中間に位置すると考えるのが正確です。
+- **19製品で唯一（Step Functions と並んで）GUI でワークフローを定義できます。** ただしコードではなく JSON 定義なので、**入門編 §12.2 の「git diff でレビューできる」という利点は半減**します。iPaaS と durable execution の中間に位置すると考えるのが正確です。
 
-### 3.9 LittleHorse
+### 5.9 LittleHorse
 
 | 項目 | 内容 |
 |---|---|
@@ -246,10 +414,10 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 **特徴**
 
 - **Kafka を既に運用している組織にとっては、耐久層が既存資産で済む**という一点が効きます。
-- User Task（人間の作業）が組み込み。リアルタイム可観測性とリトライによる自動復旧。
+- User Task（人間の作業）が組み込み。Dashboard は有向グラフを可視化し、UI から実行も可能。CLI は `lhctl`。
 - ライセンスがサーバ側で OSI 準拠でない点は、選定時の明確な検討事項です。
 
-### 3.10 Dapr Workflows / Dapr Agents
+### 5.10 Dapr Workflows / Dapr Agents
 
 | 項目 | 内容 |
 |---|---|
@@ -266,22 +434,22 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 
 ---
 
-## 4. カテゴリB — マネージド / プラットフォーム組み込み
+## 6. カテゴリB — マネージド / プラットフォーム組み込み
 
 **運用が消える代わりに、プラットフォームに乗ります。**
 
-### 4.1 比較表
+### 6.1 比較表
 
 | | AWS Lambda Durable Functions | AWS Step Functions | Azure Durable Functions | Cloudflare Workflows | Vercel Workflows | Upstash Workflow |
 |---|---|---|---|---|---|---|
-| 定義の書き方 | **コード** | JSON（ASL） | **コード** | **コード** | **コード**（`"use workflow"`） | **コード** |
+| 定義の書き方 | **コード** | **GUI or JSON（ASL）** | **コード** | **コード** | **コード**（`"use workflow"`） | **コード** |
 | 言語 | Node.js / Python / Java / .NET | 非依存 | .NET / Python / Java / JS / PowerShell | TypeScript（Python ベータ） | TypeScript / Python（ベータ） | TypeScript / Python |
-| 最長待機 | **1年** | Standard 1年 / Express 5分 | 実質無制限 | 365日 | — | 1年 |
-| ステップ上限 | 3,000 durable operations | 25,000 履歴イベント | — | 1,024（無料）/ 25,000（有料） | — | 1,000（引き上げ可） |
-| ペイロード | 耐久状態 100MB | 256 KiB / state | — | 1 MiB / step | — | 1〜50MB |
+| 最長待機 | **1年** | Standard 1年 / Express 5分 | 実質無制限 | 365日 | **無制限** | 1年 |
+| ステップ上限 | 3,000 durable operations | 25,000 履歴イベント | — | 1,024（無料）/ 25,000（有料） | 10,000（イベントは25,000） | 1,000（引き上げ可） |
+| ペイロード | 耐久状態 100MB | 256 KiB / state | — | 1 MiB / step | 50MB（1run 合計 2GB） | 1〜50MB |
 | 自前ホスト | 不可 | 不可 | Durable Task SDK は任意基盤で可 | 不可 | **可**（Postgres 実装） | 不可 |
 
-### 4.2 AWS Lambda Durable Functions
+### 6.2 AWS Lambda Durable Functions
 
 2025年 re:Invent で発表。**入門編 §4.3 で引用されている「step で包む方式」がこれです。**
 
@@ -290,23 +458,25 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - **最も嫌らしい落とし穴**: step の外での状態変更は**黙って失敗する**。初回は正しく見え、リプレイ時にその変更だけがリセットされる。入門編 §4.4 の「黙って壊れる」の実例。
 - ランタイム: Node.js 22/24、Python 3.13/3.14、Java 17/21/25、.NET。OCI コンテナも可。Java は2026年4月 GA、.NET は2026年7月 GA。2026年6月時点で約31リージョン。
 - 実行タイムアウトは60秒〜1年（既定24時間）。ただし**個々の invocation は Lambda の15分制限のまま**。
+- 課金は**3次元**（durable operation $8.00/100万、書き込み $0.25/GB、保持 $0.15/GB月）＋ 通常の Lambda 課金。
 - **Step Functions の代替ではありません。** 大規模な fan-out（数百万件）は Distributed Map の領分で、durable functions は苦手。AWS 自身が「補完関係」と位置づけており、ハイブリッド構成（Step Functions がサービス間グラフ、durable functions がコード中心の区間）が推奨。
 
-### 4.3 Azure Durable Functions / Durable Task SDKs
+### 6.3 Azure Durable Functions / Durable Task SDKs
 
 - **orchestrator / activity の分離**は Temporal の Workflow / Activity と同型。イベントソーシング＋決定論的リプレイ。Temporal の系譜そのもの（入門編でも触れたとおり、Temporal の作者は Azure Durable Functions の設計にも関わっている）。
 - 注目すべきは **Durable Task SDKs** の分離です。**ポータブルな OSS ライブラリとして切り出され、Azure Container Apps / Kubernetes / VM など任意の基盤で動く。** Azure Functions に縛られなくなった。
 - **Durable Task Scheduler** が推奨の状態プロバイダ。専用ストレージアカウント不要でレイテンシも改善。Dedicated SKU が2025年11月 GA、**Consumption SKU が2026年3月 GA**。
+- 課金は Consumption が **dispatch された action 従量（最低コミット・アイドルコストなし、最大500 action/秒、保持30日）**、Dedicated が **CU 単位（1CU = 最大2,000 action/秒・50GB、1デプロイ最大3CU）**。
 
-### 4.4 Cloudflare Workflows
+### 6.4 Cloudflare Workflows
 
 - `step.do` / `step.sleep` / `step.sleepUntil` / `step.waitForEvent`。既定リトライ5回（指数バックオフ）。
 - **2026年5月に Dynamic Workflows** を追加。ワークフロー定義を事前デプロイせず Dynamic Worker 内でオンデマンドにロードする — **テナントごとに異なるワークフローを動かす**用途に効きます。
 - **Agents SDK と第一級で統合**されている唯一のエンジン。
-- **課金が2026年8月10日以降にステップ単位へ変更**（有料プランは月50万ステップ込み、超過分 $0.80 / 10万ステップ。無料は日3,000ステップ）。**sleep もイベント待ちも1ステップとして数えられます。** 長時間待機を多用する設計はコスト再計算が必要。
+- **課金が2026年8月10日以降にステップ単位へ変更**（有料プランは月50万ステップ込み、超過分 $0.80 / 10万ステップ。無料は日3,000ステップ）。**sleep もイベント待ちも1ステップとして数えられます**（→ §4.4）。
 - 代償は Cloudflare への集中。ステップ出力 1 MiB は他より小さい。
 
-### 4.5 Vercel Workflows / Workflow DevKit
+### 6.5 Vercel Workflows / Workflow DevKit
 
 **プログラミングモデルが異質で、注目に値します。**
 
@@ -318,9 +488,10 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - **外部オーケストレータが存在しません。** 調整はすべてアプリコード内で完結し、Fluid compute の上で走る。「step が実際に走っている計算分だけ払う」モデル。
 - **「Worlds」というアダプタ機構**で、イベントログ・計算・キューの3要素を差し替えられる。マネージド（Vercel）／自前ホスト（Postgres 参照実装）／組み込み、の3形態。コミュニティが MongoDB、Redis、Turso、Cloudflare 向けアダプタを作っている。
 - SDK は OSS。TypeScript が本命、Python はベータ（デコレータ `@wf.workflow` / `@wf.step`）。
+- **実行時間と sleep に上限がありません。** 一方でイベント数（25,000/run）とステップ数（10,000/run）に上限があり、2,000イベントまたは1GB を超えるとリプレイが遅くなるため、子ワークフローへの分割が推奨されています。
 - **ランタイムに縛られない durable execution SDK** という立ち位置は、この一覧では他にありません。ただし新しく、実績はこれから。
 
-### 4.6 Upstash Workflow
+### 6.6 Upstash Workflow
 
 - QStash の上に構築。**ステップごとに自分のアプリへ HTTP 呼び出しが飛び、結果を Upstash が保持する。** ワーカーもサーバも Postgres も要らない。
 - **30日 sleep が計算0で、課金上は1ステップ。** アイドルの安さは随一。$1 / 10万ステップ、月額固定費なし。
@@ -328,15 +499,15 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 - `context.waitForEvent` / `context.notify`。イベントを待機点到達前に保存してレースを防ぐ設計。
 - 自前ホスト不可。Upstash 前提。
 
-### 4.7 Trigger.dev
+### 6.7 Trigger.dev
 
-- **Apache 2.0。Docker + Postgres で全機能を自前ホストでき、機能制限も実行数制限もない。** OSI 準拠ライセンスのマネージド系としては強い。
+- **Apache 2.0。Docker + Postgres で全機能を自前ホストでき、機能制限も実行数制限もない。** OSI 準拠ライセンスのマネージド系としては強い（→ §4.5）。
 - TypeScript ファースト。タスクは Trigger.dev のマシンにデプロイされ、アプリからトリガーする（**アプリと別デプロイ**になる点は好みが分かれる）。
 - プラットフォームのタイムアウトが無い。Cloud では5秒超の待機をチェックポイントして計算課金を避ける。
 
 ---
 
-## 5. カテゴリC — エージェントフレームワーク側の耐久機構
+## 7. カテゴリC — エージェントフレームワーク側の耐久機構
 
 **入門編 §9.6 の「もはやオプションではなくベースライン要件」がここに現れています。**
 
@@ -347,7 +518,7 @@ Temporal は pull、Restate / Inngest / Upstash / Vercel は push です。**入
 | **OpenAI Agents SDK** | **外部エンジンに委譲** | Temporal 連携が2026年3月23日 GA。サンドボックス統合も |
 | **Dapr Agents** | **Dapr Workflows** | v1.0 で本番対応。Pub/Sub でマルチエージェント協調 |
 
-### 5.1 LangGraph の checkpointer に関する重要な注意
+### 7.1 LangGraph の checkpointer に関する重要な注意
 
 checkpointer を設定すれば「durable execution が有効」と説明されますが、**入門編の定義に照らすと、これは半分です。**
 
@@ -361,7 +532,7 @@ checkpointer を設定すれば「durable execution が有効」と説明され�
 
 ---
 
-## 6. カテゴリD — 隣接だが別物（混同注意）
+## 8. カテゴリD — 隣接だが別物（混同注意）
 
 **ここを混ぜると選定が壊れます。**
 
@@ -378,7 +549,7 @@ Windmill（Python / TypeScript / Go / Bash をワークフロー化、Git バー
 
 ---
 
-## 7. 実装方式で並べ直す
+## 9. 実装方式で並べ直す
 
 入門編 §10 の2分類を、調査対象全体に適用したものです。
 
@@ -402,7 +573,7 @@ Golem
 
 ---
 
-## 8. 選び方
+## 10. 選び方
 
 決め手になりやすい順に並べます。
 
@@ -416,9 +587,10 @@ Golem
 | **バックグラウンドジョブが主で、キュー機能が要る** | **Hatchet** | レート制限・優先度・fair scheduling が厚い |
 | **Kubernetes に Dapr が入っている** | **Dapr Workflows / Agents** | 追加コストほぼゼロ |
 | **Kafka を運用している** | **LittleHorse** | 耐久層が既存資産 |
-| **人間の承認・業務プロセスの可視化が主目的** | **Conductor** / **Camunda** | UI と human task が第一級 |
+| **人間の承認・業務プロセスの可視化が主目的** | **Conductor** / **Camunda** | UI と human task が第一級。**GUI で定義できる数少ない選択肢** |
 | **エージェントのサンドボックス隔離も同時に解きたい** | **Golem** | grant がジャーナルされる WASM サンドボックス |
-| **既存の LangGraph 資産がある** | **LangGraph ＋ 外部エンジン** | checkpointer だけでは §5.1 の穴が残る |
+| **既存の LangGraph 資産がある** | **LangGraph ＋ 外部エンジン** | checkpointer だけでは §7.1 の穴が残る |
+| **月額固定費をゼロにしたい** | **Upstash Workflow** / **Trigger.dev 自前ホスト** | 前者は $1/10万ステップのみ、後者は Apache 2.0 で無制限 |
 
 ### 決めきれないときの現実解
 
@@ -428,7 +600,7 @@ Golem
 
 ---
 
-## 9. 入門編 §10 との対応
+## 11. 入門編 §10 との対応
 
 入門編の表を、本書の内容で補正すると次のようになります。
 
@@ -443,7 +615,7 @@ Golem
 
 **入門編には無かったが押さえるべきもの:**
 
-- **Conductor** — 全履歴を無期限保持し、任意タスクからの再実行を UI で提供。AI プロバイダ14種をネイティブ統合
+- **Conductor** — 全履歴を無期限保持し、任意タスクからの再実行を UI で提供。AI プロバイダ14種をネイティブ統合。**GUI で定義できる2製品のうちの1つ**
 - **Vercel Workflow DevKit** — `"use workflow"` によるランタイム非依存の SDK。方向性が新しい
 - **Golem** — 唯一の透過的方式（step で包まなくてよい）
 - **Dapr Workflows / Agents** — CNCF。K8s に既に居るなら追加コストほぼゼロ
@@ -451,21 +623,50 @@ Golem
 
 ---
 
-## 10. この調査の限界
+## 12. 3つの質問について — 意図の確認と補足
 
-**この分野は月単位で動いています。**
+本書 §1・§3・§4 は、以下の質問への回答として追記したものです。質問そのものへの評価を記しておきます。
 
-- Cloudflare Workflows は「GA は2025年、2026年に再アーキテクチャ、制限と API は毎月動く」と評されている状態です。
-- AWS Lambda Durable Functions は2025年12月に単一リージョンで登場し、2026年6月時点で約31リージョンまで広がりました。言語 SDK の GA も Java（4月）、.NET（7月）と順次です。
-- **二次情報のライセンス・自前ホスト可否は特に信用できません。** 本書の調査中にも「Inngest は自前ホスト不可」という誤った記述が複数の比較記事で見つかりました（公式は1.0 で自前ホストを提供）。LittleHorse のサーバライセンスも AGPLv3 / SSPL の両方の記述が見つかり、確定できていません。
+| 質問 | 評価 | 対応 |
+|---|---|---|
+| **1. 種別の定義が分からない** | **正当な指摘。初版の不備です** | 3つの観点が混在していた。単一軸に整理し §1 軸1 に定義を明記 |
+| **2. GUI か CLI か** | **意図は妥当。ただし軸が二択にならない** | 3層に分解が必要（§3）。実質「定義方法」だけが選定に効く |
+| **3. 無料か有料か** | **正当。ただし二択で見ると必ず誤る** | 3費目に分解が必要（§4）。OSS の「無料」はインフラ費と運用工数を含まない |
 
-> **採用判断の直前には、必ず公式ドキュメントと LICENSE ファイルを直接確認してください。** 本書は候補を絞り込むための地図であって、契約の根拠ではありません。
+### まと外れな質問はありませんでした
+
+ただし、**この3つだけでは製品を選べない**という点は指摘しておきます。選定を実際に左右するのは、優先度順に:
+
+1. **実装方式（§1 軸2）** — ジャーナルリプレイなら決定論制約を受け入れる必要がある。**コードの書き方そのものが変わる話で、後から変更が効きません**
+2. **既存インフラ（§10）** — Postgres しかないのか、AWS 全振りなのか、Kubernetes に Dapr が居るのか
+3. **チームの言語（§2）** — SDK が無ければ検討対象になりません
+
+**GUI/CLI と料金は、候補が2〜3に絞れた後の決着要因です。** 逆に言えば、初版で候補は絞れた状態なので、質問のタイミングとしては妥当です。
+
+### 次に聞くとよいこと
+
+- **「実行中のワークフローがある状態で、どうデプロイするか」** — 入門編 §11.1 のバージョニング問題。**導入後に最も痛む箇所**で、製品ごとに道具立てが大きく違います。ここを比較していないのが本書の最大の欠落です
+- **「データがどこに置かれるか」** — マネージドを使う場合のリージョンと監査要件
+- **「障害時に人間がどう介入するか」** — 失敗したワークフローの再開・スキップ・補償を、UI で押せるのか API を叩くのか。Conductor と Upstash はここが手厚く、他は差があります
 
 ---
 
-## 11. 次に調べるとよいキーワード
+## 13. この調査の限界
 
-- 各エンジンの **versioning / determinism テスト** の仕組み（入門編 §11.1）
+**この分野は月単位で動いています。**
+
+- Cloudflare Workflows は「GA は2025年、2026年に再アーキテクチャ、制限と API は毎月動く」と評されている状態です。**課金体系そのものが2026年8月10日に変わります。**
+- AWS Lambda Durable Functions は2025年12月に単一リージョンで登場し、2026年6月時点で約31リージョンまで広がりました。言語 SDK の GA も Java（4月）、.NET（7月）と順次です。
+- **料金は特に陳腐化が早い項目です。** §4 の数値は2026年8月時点のもので、プラン構成ごと変わることがあります。
+- **二次情報のライセンス・自前ホスト可否は特に信用できません。** 本書の調査中にも「Inngest は自前ホスト不可」という誤った記述が複数の比較記事で見つかりました（公式は1.0 で自前ホストを提供）。LittleHorse のサーバライセンスも AGPLv3 / SSPL の両方の記述が見つかり、確定できていません。Restate Cloud の有償プラン価格も公式ページから確定できませんでした。
+
+> **採用判断の直前には、必ず公式ドキュメントと LICENSE ファイル、そして価格ページを直接確認してください。** 本書は候補を絞り込むための地図であって、契約の根拠ではありません。
+
+---
+
+## 14. 次に調べるとよいキーワード
+
+- 各エンジンの **versioning / determinism テスト** の仕組み（入門編 §11.1、→ §12「次に聞くとよいこと」）
 - Temporal **Nexus**（ワークフロー間の疎結合な呼び出し）
 - Restate の **Virtual Object** と、アクターモデルとの関係
 - **Durable Task SDKs**（Azure）のポータビリティ — Azure 外での運用
@@ -477,23 +678,32 @@ Golem
 
 ## 出典
 
-- [Temporal](https://temporal.io/) / [temporalio/temporal (MIT)](https://github.com/temporalio/temporal) / [Temporal Docs](https://docs.temporal.io/) / [OpenAI Agents SDK 統合](https://temporal.io/blog/announcing-openai-agents-sdk-integration) / [Pydantic AI との統合](https://temporal.io/blog/build-durable-ai-agents-pydantic-ai-and-temporal)
-- [Restate](https://restate.dev/) / [restatedev/restate](https://github.com/restatedev/restate) / [Restate vs Temporal](https://restate.dev/vs/temporal) / [What is Durable Execution?](https://restate.dev/what-is-durable-execution)
-- [DBOS Transact](https://www.dbos.dev/dbos-transact) / [dbos-transact-py (MIT)](https://github.com/dbos-inc/dbos-transact-py) / [DBOS vs Temporal](https://www.dbos.dev/compare/dbos-vs-temporal) / [Postgres is all you need](https://www.dbos.dev/blog/postgres-is-all-you-need-for-durable-execution)
-- [hatchet-dev/hatchet (MIT)](https://github.com/hatchet-dev/hatchet) / [Hatchet](https://hatchet.run/)
-- [Inngest 自前ホストの発表](https://www.inngest.com/blog/inngest-1-0-announcing-self-hosting-support)
-- [resonatehq/resonate (Apache 2.0)](https://github.com/resonatehq/resonate) / [Resonate Docs](https://docs.resonatehq.io/)
-- [Golem](https://golem.cloud/) / [Golem Goes Open Source](https://golem.cloud/blog/golem-goes-open-source/) / [The Rise of the Agent Runtime](https://golem.cloud/blog/the-rise-of-the-agent-runtime/)
-- [Conductor OSS FAQ](https://conductor-oss.github.io/conductor/devguide/faq.html) / [Conductor Architecture](https://conductor-oss.github.io/conductor/devguide/architecture/index.html) / [Orkes](https://orkes.io/what-is-conductor)
-- [littlehorse-enterprises/littlehorse](https://github.com/littlehorse-enterprises/littlehorse) / [LittleHorse Docs](https://littlehorse.io/docs)
+**エンジン本体**
+
+- [Temporal](https://temporal.io/) / [temporalio/temporal (MIT)](https://github.com/temporalio/temporal) / [Temporal Docs](https://docs.temporal.io/) / [Temporal Pricing](https://temporal.io/pricing) / [OpenAI Agents SDK 統合](https://temporal.io/blog/announcing-openai-agents-sdk-integration) / [Pydantic AI との統合](https://temporal.io/blog/build-durable-ai-agents-pydantic-ai-and-temporal)
+- [Restate](https://restate.dev/) / [restatedev/restate](https://github.com/restatedev/restate) / [Restate vs Temporal](https://restate.dev/vs/temporal) / [Restate Cloud 一般公開](https://www.restate.dev/blog/announcing-restate-cloud-public) / [Restate CLI 設定](https://docs.restate.dev/references/cli-config)
+- [DBOS Transact](https://www.dbos.dev/dbos-transact) / [dbos-transact-py (MIT)](https://github.com/dbos-inc/dbos-transact-py) / [DBOS Pricing](https://www.dbos.dev/pricing) / [DBOS CLI](https://docs.dbos.dev/python/reference/cli) / [DBOS Conductor](https://www.dbos.dev/dbos-conductor) / [DBOS vs Temporal](https://www.dbos.dev/compare/dbos-vs-temporal)
+- [hatchet-dev/hatchet (MIT)](https://github.com/hatchet-dev/hatchet) / [Hatchet Pricing](https://hatchet.run/pricing) / [Hatchet CLI](https://docs.hatchet.run/cli) / [Hatchet Self-Hosting](https://docs.hatchet.run/self-hosting)
+- [Inngest 自前ホストの発表](https://www.inngest.com/blog/inngest-1-0-announcing-self-hosting-support) / [Inngest Pricing](https://www.inngest.com/pricing)
+- [Trigger.dev Pricing](https://trigger.dev/pricing)
+- [resonatehq/resonate (Apache 2.0)](https://github.com/resonatehq/resonate) / [Resonate Docs](https://docs.resonatehq.io/) / [Resonate CLI ガイド](https://docs.resonatehq.io/get-started/cli-guide)
+- [Golem](https://golem.cloud/) / [Golem Cloud 価格・商用オプション](https://golem.cloud/cloud/) / [Golem Goes Open Source](https://golem.cloud/blog/golem-goes-open-source/) / [The Rise of the Agent Runtime](https://golem.cloud/blog/the-rise-of-the-agent-runtime/)
+- [Conductor OSS FAQ](https://conductor-oss.github.io/conductor/devguide/faq.html) / [Conductor UI でのワークフロー構築](https://orkes.io/content/developer-guides/build-workflows-using-ui) / [conductor-oss/conductor-cli](https://github.com/conductor-oss/conductor-cli) / [Orkes](https://orkes.io/what-is-conductor)
+- [littlehorse-enterprises/littlehorse](https://github.com/littlehorse-enterprises/littlehorse) / [lhctl](https://littlehorse.io/docs/server/developer-guide/lhctl) / [LittleHorse Docs](https://littlehorse.io/docs)
 - [Dapr Workflow](https://docs.dapr.io/developing-applications/building-blocks/workflow/workflow-architecture/) / [Dapr Agents](https://docs.dapr.io/developing-ai/dapr-agents/) / [dapr/dapr-agents](https://github.com/dapr/dapr-agents)
-- [AWS Lambda Durable Functions 実践ガイド](https://hidekazu-konishi.com/entry/aws_lambda_durable_functions_practical_guide.html) / [AWS 発表（2025年12月）](https://aws.amazon.com/about-aws/whats-new/2025/12/lambda-durable-multi-step-applications-ai-workflows/) / [.NET SDK GA](https://aws.amazon.com/about-aws/whats-new/2026/07/lambdadf-dotnet/)
-- [Azure Durable Task 概要](https://learn.microsoft.com/en-us/azure/durable-task/common/what-is-durable-task) / [Durable Task Scheduler](https://learn.microsoft.com/en-us/azure/azure-functions/durable/durable-task-scheduler/durable-task-scheduler) / [Consumption SKU GA](https://techcommunity.microsoft.com/blog/appsonazureblog/the-durable-task-scheduler-consumption-sku-is-now-generally-available/4506682)
-- [Cloudflare Workflows GA](https://blog.cloudflare.com/workflows-ga-production-ready-durable-execution/) / [Dynamic Workflows](https://blog.cloudflare.com/dynamic-workflows/) / [Workflows 製品ページ](https://www.cloudflare.com/solutions/workflows/)
-- [Vercel: A new programming model for durable execution](https://vercel.com/blog/a-new-programming-model-for-durable-execution) / [Vercel Workflows Docs](https://vercel.com/docs/workflows)
+
+**マネージド / プラットフォーム**
+
+- [AWS Lambda Durable Functions 実践ガイド](https://hidekazu-konishi.com/entry/aws_lambda_durable_functions_practical_guide.html) / [AWS 発表（2025年12月）](https://aws.amazon.com/about-aws/whats-new/2025/12/lambda-durable-multi-step-applications-ai-workflows/) / [.NET SDK GA](https://aws.amazon.com/about-aws/whats-new/2026/07/lambdadf-dotnet/) / [AWS Lambda Pricing](https://aws.amazon.com/lambda/pricing/)
+- [Azure Durable Task 概要](https://learn.microsoft.com/en-us/azure/durable-task/common/what-is-durable-task) / [Durable Task Scheduler](https://learn.microsoft.com/en-us/azure/azure-functions/durable/durable-task-scheduler/durable-task-scheduler) / [Durable Task Scheduler 課金](https://learn.microsoft.com/en-us/azure/durable-task/scheduler/durable-task-scheduler-billing) / [Consumption SKU GA](https://techcommunity.microsoft.com/blog/appsonazureblog/the-durable-task-scheduler-consumption-sku-is-now-generally-available/4506682)
+- [Cloudflare Workflows GA](https://blog.cloudflare.com/workflows-ga-production-ready-durable-execution/) / [Dynamic Workflows](https://blog.cloudflare.com/dynamic-workflows/) / [Workers Pricing](https://developers.cloudflare.com/workers/platform/pricing/)
+- [Vercel: A new programming model for durable execution](https://vercel.com/blog/a-new-programming-model-for-durable-execution) / [Vercel Workflows Docs](https://vercel.com/docs/workflows) / [Workflow Pricing and Limits](https://vercel.com/docs/workflows/pricing)
 - [Upstash: Durable Workflow Engines in 2026](https://upstash.com/blog/durable-workflow-engines-compared-every-major-option-in-2026) / [upstash/workflow-js](https://github.com/upstash/workflow-js)
 - [Convex Workflow component](https://www.convex.dev/components/workflow) / [get-convex/workflow](https://github.com/get-convex/workflow)
-- [LangGraph Durable execution](https://docs.langchain.com/oss/python/langgraph/durable-execution) / [Why Checkpoints Aren't Durable Execution (Diagrid)](https://www.diagrid.io/blog/checkpoints-are-not-durable-execution-why-langgraph-crewai-google-adk-and-others-fall-short-for-production-agent-workflows)
+
+**エージェント / 比較記事**
+
+- [LangGraph Durable execution](https://docs.langchain.com/oss/python/langgraph/durable-execution) / [LangGraph Pricing の解説](https://www.truefoundry.com/blog/langgraph-pricing) / [Why Checkpoints Aren't Durable Execution (Diagrid)](https://www.diagrid.io/blog/checkpoints-are-not-durable-execution-why-langgraph-crewai-google-adk-and-others-fall-short-for-production-agent-workflows)
 - [Durable Execution: How Temporal, Restate, and DBOS Are Rethinking Distributed State](https://devstarsj.github.io/2026/04/03/durable-execution-temporal-restate-dbos-distributed-workflows-2026/)
 - [9 Best Temporal Alternatives (ZenML)](https://www.zenml.io/blog/temporal-alternatives) / [10 Best Inngest Alternatives (Diagrid)](https://www.diagrid.io/infrastructure/10-best-inngest-alternatives-2026)
 - [Kestra vs n8n vs Windmill](https://ossalt.com/guides/kestra-vs-n8n-vs-windmill-2026) / [awesome-workflow-engines](https://github.com/meirwah/awesome-workflow-engines)
