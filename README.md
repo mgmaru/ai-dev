@@ -12,6 +12,7 @@ AI 時代のソフトウェア開発について調査・議論した結果を�
 | [AI時代の開発ドキュメント設計ガイド](./docs/dev-process/ai-development-documentation-guide.md) | エージェントに必要なドキュメントの種類・粒度、コードとの乖離の防ぎ方、共通言語としてのテストと型、垂直スライスとTDD |
 | [TDD（テスト駆動開発）入門](./docs/dev-process/tdd-primer.md) | TDDとは何か、流派と周辺手法、メリット・デメリット、実証研究、AIエージェント時代のTDD |
 | [ハーネスエンジニアリング実践ガイド](./docs/dev-process/harness-engineering-guide.md) | 依存方向の機械的検証、カスタムリンター、構造テスト、修復手順つきエラーメッセージ、ドキュメント陳腐化対策、エージェントへの可視性設計、検証ループ |
+| [Codexでの並列調査・並列開発の進め方](./docs/dev-process/codex_parallel_research_and_development.md) | SubAgent と Git Worktree の使い分け、Custom Agent、並列調査で精度を上げる方法、トークン消費の抑え方 |
 
 読む順: TDD入門 → 開発ドキュメント設計ガイド → ハーネスエンジニアリング実践ガイド
 
